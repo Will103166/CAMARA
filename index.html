@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#12110e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="時間相機">
+  <title>時間相機</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icons/icon-192.png">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main id="app">
+    <section id="gate" class="gate">
+      <p class="eyebrow">現場記錄</p>
+      <h1>時間相機</h1>
+      <p class="lede">按下快門後，把拍攝時間、座標、地點和天氣寫進照片。</p>
+      <div class="stack">
+        <button id="start" class="primary" type="button">開啟相機</button>
+        <button id="demo" class="ghost" type="button">看台北101示範</button>
+        <button id="install" class="ghost" type="button" hidden>安裝到主畫面</button>
+      </div>
+      <p id="gate-note" class="fine">相機與定位會先詢問權限。地點與天氣需要連線，時間以這台裝置為準。</p>
+    </section>
+
+    <section id="camera" class="stage" hidden>
+      <video id="preview" playsinline autoplay muted></video>
+      <div class="scrim-top">
+        <p id="status" class="pill" aria-live="polite">準備中</p>
+      </div>
+      <div class="hud" aria-hidden="true">
+        <p id="hud-clock" class="clock">--:--:--</p>
+        <p id="hud-meta" class="sub">預覽，按下快門後才寫入照片</p>
+      </div>
+      <p id="toast" class="toast" hidden></p>
+      <div class="dock">
+        <div class="side">
+          <button id="pick" class="iconbtn" type="button">相簿</button>
+        </div>
+        <button id="shutter" class="shutter" type="button" aria-label="拍照"></button>
+        <div class="side right">
+          <button id="flip" class="iconbtn" type="button">翻轉</button>
+        </div>
+      </div>
+      <input id="file" type="file" accept="image/*" hidden>
+    </section>
+
+    <section id="result" class="result" hidden>
+      <img id="shot" alt="已寫入時間與地點的照片">
+      <div class="sheet">
+        <div id="meta" class="meta"></div>
+        <div class="actions">
+          <button id="retake" class="plain" type="button">重拍</button>
+          <button id="save" class="plain" type="button">儲存</button>
+          <button id="share" class="grow" type="button">分享</button>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>
