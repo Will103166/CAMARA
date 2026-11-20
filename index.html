@@ -45,6 +45,7 @@
       <div class="scrim-top">
         <p id="status" class="pill" aria-live="polite">準備中</p>
         <div class="scrim-actions">
+          <button id="sphere-toggle" class="chip" type="button" aria-pressed="false">環景</button>
           <button id="open-log" class="chip" type="button">紀錄</button>
           <button id="open-settings" class="gear" type="button" aria-label="設定">
           <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
@@ -52,6 +53,10 @@
           </svg>
           </button>
         </div>
+      </div>
+      <div id="sphere" class="sphere" hidden>
+        <p id="sphere-hint">前、右、後、左、上、下各拍至少一張。</p>
+        <div id="sphere-slots" class="sphere-slots"></div>
       </div>
       <div class="hud" aria-hidden="true">
         <p id="hud-clock" class="clock">--:--:--</p>
@@ -78,10 +83,11 @@
       <img id="shot" alt="已寫入時間與地點的照片">
       <div class="sheet">
         <div id="meta" class="meta"></div>
+        <p id="result-hint" class="hint">這張已留在紀錄。繼續拍會回到即時畫面，拍下一張。</p>
         <div class="actions">
-          <button id="retake" class="plain" type="button">重拍</button>
+          <button id="retake" class="grow" type="button">繼續拍</button>
           <button id="save" class="plain" type="button">儲存</button>
-          <button id="share" class="grow" type="button">分享</button>
+          <button id="share" class="plain" type="button">分享</button>
         </div>
       </div>
     </section>
@@ -183,6 +189,7 @@
         <button id="log-today" class="switch is-on" type="button" aria-pressed="true" aria-label="只看今天"><i></i></button>
         <button id="log-copy" class="plain" type="button">複製</button>
         <button id="log-export" class="plain" type="button">匯出 CSV</button>
+        <button id="log-map" class="plain" type="button">地圖</button>
       </div>
       <p id="log-note" class="hint">今天拍的照片會留在這台裝置上。</p>
       <pre id="log-copybox" class="log-copybox" hidden></pre>
@@ -199,7 +206,9 @@
               <th>坐標</th>
               <th>天氣</th>
               <th>方位角</th>
+              <th>相機</th>
               <th>照片名稱</th>
+              <th>地圖</th>
               <th>超連結</th>
             </tr>
           </thead>
@@ -207,6 +216,16 @@
         </table>
         <p id="log-empty" class="log-empty">今天還沒有拍攝紀錄。</p>
       </div>
+    </section>
+
+    <section id="map-screen" class="settings map-screen" hidden>
+      <div class="settings-bar">
+        <h2>地圖</h2>
+        <button id="map-close" class="done" type="button">完成</button>
+      </div>
+      <p id="map-note" class="hint">扇形是照片朝向。朝上、朝下畫成圓。</p>
+      <div id="leaflet" class="leaflet-host"></div>
+      <div id="map-photos" class="map-photos"></div>
     </section>
   </main>
   <script src="./app.js"></script>

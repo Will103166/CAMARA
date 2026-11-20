@@ -10,7 +10,9 @@ const FIELD_IDS = ["time", "place", "coords", "weather"];
 const FIELD_LABEL = { time: "時間", place: "地點", coords: "坐標", weather: "天氣" };
 const COORD_SYSTEMS = ["wgs84", "twd97-121", "twd97-119"];
 const WEEK_MODES = ["off", "week", "zhou"];
-const LOG_HEADERS = ["時間", "地點", "坐標", "天氣", "方位角", "照片名稱", "超連結"];
+const LOG_HEADERS = ["時間", "地點", "坐標", "天氣", "方位角", "相機", "照片名稱", "地圖", "超連結"];
+const SPHERE_ORDER = ["front", "right", "back", "left", "up", "down"];
+const SPHERE_LABEL = { front: "前", right: "右", back: "後", left: "左", up: "上", down: "下" };
 const ANCHORS = ["tl", "tc", "tr", "ml", "mc", "mr", "bl", "bc", "br"];
 const STORAGE_KEY = "timecam-settings-v1";
 
@@ -114,6 +116,17 @@ const ui = {
   logDownload: $("log-download"),
   logBody: $("log-body"),
   logEmpty: $("log-empty"),
+  logMap: $("log-map"),
+  resultHint: $("result-hint"),
+  sphereToggle: $("sphere-toggle"),
+  sphere: $("sphere"),
+  sphereHint: $("sphere-hint"),
+  sphereSlots: $("sphere-slots"),
+  mapScreen: $("map-screen"),
+  mapClose: $("map-close"),
+  mapNote: $("map-note"),
+  leaflet: $("leaflet"),
+  mapPhotos: $("map-photos"),
 };
 
 const state = {
@@ -150,10 +163,18 @@ const state = {
   levelText: "",
   levelShown: null,
   heading: null,
+  pitch: null,
   logTodayOnly: true,
   logRows: [],
   logObjectUrl: "",
   capturedHeading: null,
+  capturedPitch: null,
+  capturedCamera: null,
+  capturedDirection: "",
+  sphere: null,
+  sphereSignature: "",
+  leafletMap: null,
+  mapUrls: [],
 };
 
 let deferredInstall = null;
@@ -625,6 +646,7 @@ function applyPosition(position) {
     lat: position.coords.latitude,
     lon: position.coords.longitude,
     accuracy: position.coords.accuracy,
+    altitude: position.coords.altitude,
   };
   state.coords = coords;
   state.locationError = "";
@@ -821,8 +843,26 @@ function headingFromEvent(event) {
   return heading;
 }
 
+function pitchFromEvent(event) {
+  if (!Number.isFinite(event.beta)) return null;
+  const angle = Number(screen.orientation?.angle ?? window.orientation ?? 0) || 0;
+  let pitch;
+  if (angle === 90 || angle === -270) {
+    if (!Number.isFinite(event.gamma)) return null;
+    pitch = event.gamma;
+  } else if (angle === -90 || angle === 270) {
+    if (!Number.isFinite(event.gamma)) return null;
+    pitch = -event.gamma;
+  } else if (angle === 180) {
+    pitch = -(event.beta + 90);
+  } else {
+    pitch = event.beta - 90;
+  }
+  if (state.facing === "user") pitch = -pitch;
+  return Math.max(-90, Math.min(90, pitch));
+}
+
 function paintLevel() {
-  state.orientFrame = 0;
   const roll = state.pendingRoll;
   if (!Number.isFinite(roll) || ui.camera.hidden) return;
   const level = Math.abs(roll) < 1.5;
@@ -848,15 +888,25 @@ function paintLevel() {
   }
 }
 
+function paintOrientation() {
+  state.orientFrame = 0;
+  if (Number.isFinite(state.pendingRoll)) paintLevel();
+  if (state.sphere && !ui.camera.hidden) renderSphere();
+}
+
 function onOrientation(event) {
   const roll = rollFromEvent(event);
   if (Number.isFinite(roll)) {
     state.sawOrientation = true;
     state.pendingRoll = roll;
-    if (!state.orientFrame) state.orientFrame = requestAnimationFrame(paintLevel);
   }
   const heading = headingFromEvent(event);
   if (Number.isFinite(heading)) state.heading = heading;
+  const pitch = pitchFromEvent(event);
+  if (Number.isFinite(pitch)) state.pitch = pitch;
+  if ((Number.isFinite(roll) || state.sphere) && !state.orientFrame) {
+    state.orientFrame = requestAnimationFrame(paintOrientation);
+  }
 }
 
 async function enableLevel() {
@@ -1140,7 +1190,306 @@ function blobFromCanvas(canvas) {
   });
 }
 
+function readCameraInfo() {
+  const track = state.stream?.getVideoTracks?.()[0];
+  let settings = {};
+  try {
+    settings = track?.getSettings?.() || {};
+  } catch {
+    settings = {};
+  }
+  return {
+    label: track?.label || "",
+    facing: settings.facingMode || state.facing || "",
+    width: settings.width || ui.preview.videoWidth || 0,
+    height: settings.height || ui.preview.videoHeight || 0,
+    zoom: state.zoom,
+  };
+}
+
+function formatCamera(info, direction) {
+  if (!info && !direction) return "";
+  const facing = info?.facing === "user" ? "前鏡頭" : info?.facing === "environment" ? "後鏡頭" : "";
+  const size = info?.width && info?.height ? `${info.width}×${info.height}` : "";
+  const zoom = Number.isFinite(info?.zoom) ? `${Number(info.zoom).toFixed(1)}×` : "";
+  const label = info?.label && info.label.length <= 32 ? info.label : "";
+  return [direction ? SPHERE_LABEL[direction] || direction : "", facing, size, zoom, label].filter(Boolean).join(" · ");
+}
+
+function angleDiff(a, b) {
+  return Math.abs((((a - b) % 360) + 540) % 360 - 180);
+}
+
+function suggestedSlot() {
+  if (!state.sphere) return "";
+  const pitch = state.pitch;
+  if (Number.isFinite(pitch) && pitch >= 50) return "up";
+  if (Number.isFinite(pitch) && pitch <= -50) return "down";
+  if (Number.isFinite(pitch) && Math.abs(pitch) > 40) return "";
+  if (!Number.isFinite(state.heading) || !Number.isFinite(state.sphere.origin)) return "";
+  const delta = (state.heading - state.sphere.origin + 360) % 360;
+  const names = ["front", "right", "back", "left"];
+  const index = Math.round(delta / 90) % 4;
+  if (angleDiff(delta, index * 90) > 35) return "";
+  return names[index];
+}
+
+function sphereMissing() {
+  if (!state.sphere) return "";
+  const missing = SPHERE_ORDER.filter((id) => state.sphere.counts[id] < 1).map((id) => SPHERE_LABEL[id]);
+  return missing.length ? `還缺 ${missing.join("、")}` : "六個方向都拍了";
+}
+
+function sphereHint() {
+  if (!state.sphere) return "";
+  const missing = sphereMissing();
+  if (missing === "六個方向都拍了") return "六個方向都有照片了，可以再補拍，或再按一次環景結束這個點位。";
+  const aim = suggestedSlot();
+  if (!Number.isFinite(state.heading) && aim !== "up" && aim !== "down") {
+    return `沒有羅盤時先點方向。${missing}`;
+  }
+  if (aim && state.sphere.counts[aim] < 1) return `已對準${SPHERE_LABEL[aim]}，按快門。${missing}`;
+  if (aim) return `現在朝${SPHERE_LABEL[aim]}。${missing}`;
+  const next = SPHERE_ORDER.find((id) => state.sphere.counts[id] < 1);
+  return `請轉向${SPHERE_LABEL[next]}。${missing}`;
+}
+
+function renderSphere() {
+  const on = Boolean(state.sphere);
+  ui.sphere.hidden = !on;
+  ui.sphereToggle.classList.toggle("is-on", on);
+  ui.sphereToggle.setAttribute("aria-pressed", String(on));
+  if (!on) {
+    state.sphereSignature = "";
+    return;
+  }
+  const aim = suggestedSlot();
+  const hint = sphereHint();
+  const signature = `${aim}|${state.sphere.manual}|${SPHERE_ORDER.map((id) => state.sphere.counts[id]).join(",")}|${hint}`;
+  if (signature === state.sphereSignature) return;
+  state.sphereSignature = signature;
+  ui.sphereHint.textContent = hint;
+  ui.sphereSlots.replaceChildren();
+  for (const id of SPHERE_ORDER) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.slot = id;
+    const count = state.sphere.counts[id] || 0;
+    button.textContent = count ? `${SPHERE_LABEL[id]} ${count}` : SPHERE_LABEL[id];
+    button.classList.toggle("is-done", count > 0);
+    button.classList.toggle("is-aim", aim === id);
+    button.classList.toggle("is-on", !aim && state.sphere.manual === id);
+    ui.sphereSlots.append(button);
+  }
+}
+
+function toggleSphere() {
+  if (state.sphere) {
+    const done = SPHERE_ORDER.every((id) => state.sphere.counts[id] >= 1);
+    state.sphere = null;
+    renderSphere();
+    showToast(done ? "這個點位六個方向都拍了，可在地圖看視角" : "已結束這個環景點位");
+    return;
+  }
+  state.sphere = {
+    id: crypto.randomUUID?.() || `spot-${Date.now()}`,
+    origin: Number.isFinite(state.heading) ? state.heading : null,
+    counts: { front: 0, right: 0, back: 0, left: 0, up: 0, down: 0 },
+    manual: "front",
+  };
+  state.sphereSignature = "";
+  renderSphere();
+  showToast(Number.isFinite(state.heading) ? "前是現在的朝向。接著拍右、後、左，再拍上和下" : "先點方向，再按快門");
+}
+
+function commitSphereSlot(slot) {
+  if (!state.sphere || !slot) return;
+  const heading = state.capturedHeading;
+  if (state.sphere.origin == null && Number.isFinite(heading) && slot !== "up" && slot !== "down") {
+    const offset = { front: 0, right: 90, back: 180, left: 270 }[slot] || 0;
+    state.sphere.origin = (heading - offset + 360) % 360;
+  }
+  state.sphere.counts[slot] = (state.sphere.counts[slot] || 0) + 1;
+  state.sphereSignature = "";
+  renderSphere();
+}
+
+function exifDate(date) {
+  return `${date.getFullYear()}:${pad(date.getMonth() + 1)}:${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function asciiExif(text) {
+  const clean = String(text || "").replace(/[^\x20-\x7e]/g, "").slice(0, 48) || "TimeCam";
+  const bytes = new Uint8Array(clean.length + 1);
+  for (let i = 0; i < clean.length; i += 1) bytes[i] = clean.charCodeAt(i);
+  return bytes;
+}
+
+function exifRationals(pairs) {
+  const bytes = new Uint8Array(pairs.length * 8);
+  const view = new DataView(bytes.buffer);
+  pairs.forEach(([num, den], index) => {
+    view.setUint32(index * 8, num, true);
+    view.setUint32(index * 8 + 4, den, true);
+  });
+  return bytes;
+}
+
+function dmsPairs(value) {
+  const abs = Math.abs(value);
+  let degrees = Math.floor(abs);
+  let minutes = Math.floor((abs - degrees) * 60);
+  let seconds = Math.round(((abs - degrees) * 60 - minutes) * 60 * 10000);
+  if (seconds >= 600000) {
+    seconds = 0;
+    minutes += 1;
+  }
+  if (minutes >= 60) {
+    minutes = 0;
+    degrees += 1;
+  }
+  return [[degrees, 1], [minutes, 1], [seconds, 10000]];
+}
+
+function buildTiff(meta) {
+  const when = asciiExif(meta.when);
+  const make = asciiExif("TimeCam");
+  const model = asciiExif(meta.model || "TimeCam");
+  const entries0 = [
+    { tag: 0x010f, type: 2, count: make.length, value: make },
+    { tag: 0x0110, type: 2, count: model.length, value: model },
+    { tag: 0x0112, type: 3, count: 1, value: 1 },
+    { tag: 0x0132, type: 2, count: when.length, value: when },
+  ];
+  const exifPtr = { tag: 0x8769, type: 4, count: 1, value: 0 };
+  entries0.push(exifPtr);
+  const exifEntries = [
+    { tag: 0x9003, type: 2, count: when.length, value: when },
+    { tag: 0x9004, type: 2, count: when.length, value: when },
+  ];
+  if (meta.width) exifEntries.push({ tag: 0xa002, type: 4, count: 1, value: meta.width });
+  if (meta.height) exifEntries.push({ tag: 0xa003, type: 4, count: 1, value: meta.height });
+  const ifds = [entries0, exifEntries];
+  let gpsPtr = null;
+  if (Number.isFinite(meta.lat) && Number.isFinite(meta.lon)) {
+    gpsPtr = { tag: 0x8825, type: 4, count: 1, value: 0 };
+    entries0.push(gpsPtr);
+    const latRef = asciiExif(meta.lat >= 0 ? "N" : "S");
+    const lonRef = asciiExif(meta.lon >= 0 ? "E" : "W");
+    const gps = [
+      { tag: 0x0000, type: 1, count: 4, value: new Uint8Array([2, 3, 0, 0]) },
+      { tag: 0x0001, type: 2, count: latRef.length, value: latRef },
+      { tag: 0x0002, type: 5, count: 3, value: exifRationals(dmsPairs(meta.lat)) },
+      { tag: 0x0003, type: 2, count: lonRef.length, value: lonRef },
+      { tag: 0x0004, type: 5, count: 3, value: exifRationals(dmsPairs(meta.lon)) },
+    ];
+    if (Number.isFinite(meta.altitude)) {
+      const alt = Math.abs(meta.altitude);
+      gps.push({ tag: 0x0005, type: 1, count: 1, value: meta.altitude < 0 ? 1 : 0 });
+      gps.push({ tag: 0x0006, type: 5, count: 1, value: exifRationals([[Math.round(alt * 100), 100]]) });
+    }
+    if (Number.isFinite(meta.heading)) {
+      const ref = asciiExif("T");
+      gps.push({ tag: 0x0010, type: 2, count: ref.length, value: ref });
+      gps.push({ tag: 0x0011, type: 5, count: 1, value: exifRationals([[Math.round(meta.heading * 100), 100]]) });
+    }
+    ifds.push(gps);
+  }
+  for (const entries of ifds) entries.sort((a, b) => a.tag - b.tag);
+  let cursor = 8;
+  const ifdOffsets = ifds.map((entries) => {
+    const offset = cursor;
+    cursor += 2 + entries.length * 12 + 4;
+    return offset;
+  });
+  exifPtr.value = ifdOffsets[1];
+  if (gpsPtr) gpsPtr.value = ifdOffsets[2];
+  const blobs = [];
+  for (const entries of ifds) {
+    for (const entry of entries) {
+      if (entry.value instanceof Uint8Array && entry.value.length > 4 && !blobs.includes(entry.value)) blobs.push(entry.value);
+    }
+  }
+  const blobOffset = new Map();
+  for (const blob of blobs) {
+    blobOffset.set(blob, cursor);
+    cursor += blob.length;
+  }
+  const bytes = new Uint8Array(cursor);
+  const view = new DataView(bytes.buffer);
+  bytes[0] = 0x49;
+  bytes[1] = 0x49;
+  view.setUint16(2, 42, true);
+  view.setUint32(4, ifdOffsets[0], true);
+  ifds.forEach((entries, index) => {
+    let pointer = ifdOffsets[index];
+    view.setUint16(pointer, entries.length, true);
+    pointer += 2;
+    for (const entry of entries) {
+      view.setUint16(pointer, entry.tag, true);
+      view.setUint16(pointer + 2, entry.type, true);
+      view.setUint32(pointer + 4, entry.count, true);
+      if (entry.value instanceof Uint8Array && entry.value.length > 4) {
+        view.setUint32(pointer + 8, blobOffset.get(entry.value), true);
+      } else if (entry.value instanceof Uint8Array) {
+        bytes.set(entry.value, pointer + 8);
+      } else if (entry.type === 3) {
+        view.setUint16(pointer + 8, entry.value, true);
+      } else {
+        view.setUint32(pointer + 8, entry.value, true);
+      }
+      pointer += 12;
+    }
+    view.setUint32(pointer, 0, true);
+  });
+  for (const blob of blobs) bytes.set(blob, blobOffset.get(blob));
+  return bytes;
+}
+
+async function withExif(blob, meta) {
+  const input = new Uint8Array(await blob.arrayBuffer());
+  if (input[0] !== 0xff || input[1] !== 0xd8) return blob;
+  const tiff = buildTiff(meta);
+  const content = 6 + tiff.length;
+  const segment = new Uint8Array(4 + content);
+  segment[0] = 0xff;
+  segment[1] = 0xe1;
+  segment[2] = (content + 2) >> 8;
+  segment[3] = (content + 2) & 255;
+  segment[4] = 69;
+  segment[5] = 120;
+  segment[6] = 105;
+  segment[7] = 102;
+  segment.set(tiff, 10);
+  const out = new Uint8Array(input.length + segment.length);
+  out[0] = 0xff;
+  out[1] = 0xd8;
+  out.set(segment, 2);
+  out.set(input.subarray(2), 2 + segment.length);
+  return new Blob([out], { type: "image/jpeg" });
+}
+
+function exifMeta(when, canvas) {
+  const camera = state.capturedCamera || {};
+  const model = [
+    camera.facing === "user" ? "Front" : "Back",
+    camera.width && camera.height ? `${camera.width}x${camera.height}` : "",
+    Number.isFinite(camera.zoom) ? `${Number(camera.zoom).toFixed(1)}x` : "",
+  ].filter(Boolean).join(" ");
+  return {
+    when: exifDate(when),
+    model,
+    width: camera.width || canvas.width,
+    height: camera.height || canvas.height,
+    lat: state.coords?.lat,
+    lon: state.coords?.lon,
+    altitude: state.coords?.altitude,
+    heading: state.capturedHeading,
+  };
+}
+
 function renderMeta(when, source) {
+  const direction = state.capturedDirection ? SPHERE_LABEL[state.capturedDirection] : "";
   const rows = [
     ["時間", formatWhen(when)],
     ["來源", source],
@@ -1148,7 +1497,9 @@ function renderMeta(when, source) {
     ["地點", state.place || "沒有"],
     ["天氣", state.weather || "沒有"],
     ["方位角", formatHeading(state.capturedHeading) || "沒有"],
+    ["相機", formatCamera(state.capturedCamera) || (source === "相簿" ? "相簿" : "沒有")],
   ];
+  if (direction) rows.splice(6, 0, ["方向", direction]);
   ui.meta.replaceChildren();
   for (const [label, value] of rows) {
     const row = document.createElement("div");
@@ -1159,15 +1510,69 @@ function renderMeta(when, source) {
   }
 }
 
+function snapshotShot(fromCamera = true) {
+  state.capturedHeading = state.heading;
+  state.capturedPitch = state.pitch;
+  state.capturedCamera = fromCamera ? readCameraInfo() : null;
+  state.capturedDirection = fromCamera && state.sphere ? (suggestedSlot() || state.sphere.manual || "front") : "";
+}
+
 async function present(canvas, when, source) {
-  state.blob = await blobFromCanvas(canvas);
+  let blob = await blobFromCanvas(canvas);
+  try {
+    blob = await withExif(blob, exifMeta(when, canvas));
+  } catch {
+    /* 位置寫不進檔案時，仍保留這張照片 */
+  }
+  state.blob = blob;
   state.filename = filenameFor(when);
   if (state.objectUrl) URL.revokeObjectURL(state.objectUrl);
   state.objectUrl = URL.createObjectURL(state.blob);
   ui.shot.src = state.objectUrl;
   renderMeta(when, source);
+  commitSphereSlot(state.capturedDirection);
+  ui.resultHint.textContent = state.sphere
+    ? `這張已留在紀錄。${sphereMissing()}。按繼續拍回到即時畫面。`
+    : "這張已留在紀錄。繼續拍會回到即時畫面，拍下一張。";
   show("result");
   saveRecord(when, source).catch(() => showToast("這張沒有寫進拍攝紀錄"));
+}
+
+function streamIsLive() {
+  return Boolean(state.stream?.getVideoTracks?.().some((track) => track.readyState === "live"));
+}
+
+async function continueShooting() {
+  ui.settings.hidden = true;
+  ui.log.hidden = true;
+  ui.mapScreen.hidden = true;
+  show("camera");
+  state.busy = false;
+  ensureClock();
+  renderSphere();
+  if (!streamIsLive()) {
+    try {
+      await openCamera(state.facing);
+    } catch {
+      ui.shutter.disabled = true;
+      showToast("相機沒有重新打開，請再按一次繼續拍");
+    }
+    return;
+  }
+  if (ui.preview.srcObject !== state.stream) ui.preview.srcObject = state.stream;
+  try {
+    await ui.preview.play();
+  } catch {
+    try {
+      await openCamera(state.facing);
+    } catch {
+      ui.shutter.disabled = true;
+      showToast("相機沒有重新打開，請再按一次繼續拍");
+      return;
+    }
+  }
+  ui.shutter.disabled = false;
+  renderStatus();
 }
 
 function playShutter() {
@@ -1202,7 +1607,7 @@ async function captureVideo() {
   ui.shutter.disabled = true;
   playShutter();
   const when = new Date();
-  state.capturedHeading = state.heading;
+  snapshotShot();
   try {
     const canvas = makeViewCanvas();
     drawViewfinder(canvas.getContext("2d"), ui.preview, canvas.width, canvas.height);
@@ -1220,7 +1625,7 @@ async function captureBitmap(bitmap, source) {
   if (state.busy) return;
   state.busy = true;
   const when = new Date();
-  state.capturedHeading = state.heading;
+  snapshotShot(false);
   try {
     const canvas = makeCanvas(bitmap.width, bitmap.height);
     drawContain(canvas.getContext("2d"), bitmap, bitmap.width, bitmap.height, canvas.width, canvas.height);
@@ -1423,20 +1828,18 @@ ui.file.addEventListener("change", async () => {
   }
 });
 
-ui.retake.addEventListener("click", async () => {
-  show("camera");
-  if (state.stream) {
-    ui.shutter.disabled = false;
-    renderStatus();
-    return;
-  }
-  await onStart();
+ui.retake.addEventListener("click", () => {
+  continueShooting();
 });
 
 ui.save.addEventListener("click", saveToAlbum);
 ui.share.addEventListener("click", shareBlob);
 
 window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !ui.mapScreen.hidden) {
+    closeMap();
+    return;
+  }
   if (event.key === "Escape" && !ui.log.hidden) {
     closeLog();
     return;
@@ -1445,7 +1848,12 @@ window.addEventListener("keydown", (event) => {
     closeSettings();
     return;
   }
-  if (event.code === "Space" && !ui.camera.hidden && ui.settings.hidden && ui.log.hidden) {
+  if (!ui.result.hidden && ui.settings.hidden && ui.log.hidden && ui.mapScreen.hidden && (event.key === "Enter" || event.code === "Space")) {
+    event.preventDefault();
+    continueShooting();
+    return;
+  }
+  if (event.code === "Space" && !ui.camera.hidden && ui.settings.hidden && ui.log.hidden && ui.mapScreen.hidden) {
     event.preventDefault();
     captureVideo();
   }
@@ -1540,6 +1948,11 @@ async function saveRecord(when, source) {
     lon: Number.isFinite(state.coords?.lon) ? state.coords.lon : null,
     weather: state.weather || "",
     heading: Number.isFinite(state.capturedHeading) ? state.capturedHeading : null,
+    pitch: Number.isFinite(state.capturedPitch) ? state.capturedPitch : null,
+    altitude: Number.isFinite(state.coords?.altitude) ? state.coords.altitude : null,
+    camera: formatCamera(state.capturedCamera, state.capturedDirection) || (source === "相簿" ? "相簿" : ""),
+    direction: state.capturedDirection || "",
+    spotId: state.sphere?.id || "",
     filename: state.filename,
     source,
     blob: state.blob,
@@ -1575,9 +1988,20 @@ function rowValues(record) {
     coords || "—",
     record.weather || "—",
     formatHeading(record.heading) || "—",
+    record.camera || "—",
     record.filename || "—",
+    mapLink(record) || "—",
     recordLink(record.id),
   ];
+}
+
+function mapLink(record) {
+  if (!Number.isFinite(record?.lat) || !Number.isFinite(record?.lon)) return "";
+  const url = new URL(location.href);
+  url.hash = record.spotId
+    ? `spot=${encodeURIComponent(record.spotId)}`
+    : `map=${encodeURIComponent(record.id)}`;
+  return url.href;
 }
 
 function visibleRecords(records) {
@@ -1608,24 +2032,28 @@ async function renderLog() {
   ui.logBody.replaceChildren();
   ui.logEmpty.hidden = records.length > 0;
   ui.logEmpty.textContent = state.logTodayOnly ? "今天還沒有拍攝紀錄。" : "還沒有拍攝紀錄。";
-  setLogNote(state.logTodayOnly
-    ? `今天 ${records.length} 張。時間、地點、坐標、天氣和方位角可複製或匯出。`
+    setLogNote(state.logTodayOnly
+    ? `今天 ${records.length} 張。地圖網址可複製，打開後看照片視角。`
     : `全部 ${records.length} 張。`);
   for (const record of records) {
     const tr = document.createElement("tr");
     const values = rowValues(record);
     values.forEach((value, index) => {
       const td = document.createElement("td");
-      if (index === values.length - 1) {
+      const isLink = typeof value === "string" && /^https?:|^file:/i.test(value);
+      if (isLink) {
         const link = document.createElement("a");
         link.href = value;
-        link.textContent = "開啟";
-        const del = document.createElement("button");
-        del.type = "button";
-        del.className = "linkish";
-        del.dataset.delete = record.id;
-        del.textContent = "刪除";
-        td.append(link, del);
+        link.textContent = index === values.length - 1 ? "開啟" : "地圖";
+        td.append(link);
+        if (index === values.length - 1) {
+          const del = document.createElement("button");
+          del.type = "button";
+          del.className = "linkish";
+          del.dataset.delete = record.id;
+          del.textContent = "刪除";
+          td.append(del);
+        }
       } else {
         td.textContent = value;
       }
@@ -1827,14 +2255,203 @@ ui.logBody.addEventListener("click", async (event) => {
   }
 });
 
-window.addEventListener("hashchange", () => {
-  const id = recordIdFromHash();
-  if (id) showRecord(id);
+let mapFromLog = false;
+let leafletPromise = null;
+
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  if (leafletPromise) return leafletPromise;
+  leafletPromise = new Promise((resolve, reject) => {
+    const css = document.createElement("link");
+    css.rel = "stylesheet";
+    css.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+    document.head.append(css);
+    const script = document.createElement("script");
+    script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+    script.onload = () => resolve();
+    script.onerror = () => {
+      leafletPromise = null;
+      reject(new Error("leaflet"));
+    };
+    document.head.append(script);
+  });
+  return leafletPromise;
+}
+
+function clearMapThumbs() {
+  for (const url of state.mapUrls) URL.revokeObjectURL(url);
+  state.mapUrls = [];
+}
+
+function destinationPoint(lat, lon, bearingDeg, distanceM) {
+  const radius = 6378137;
+  const distance = distanceM / radius;
+  const bearing = (bearingDeg * Math.PI) / 180;
+  const lat1 = (lat * Math.PI) / 180;
+  const lon1 = (lon * Math.PI) / 180;
+  const lat2 = Math.asin(Math.sin(lat1) * Math.cos(distance) + Math.cos(lat1) * Math.sin(distance) * Math.cos(bearing));
+  const lon2 = lon1 + Math.atan2(
+    Math.sin(bearing) * Math.sin(distance) * Math.cos(lat1),
+    Math.cos(distance) - Math.sin(lat1) * Math.sin(lat2)
+  );
+  return [(lat2 * 180) / Math.PI, ((lon2 * 180) / Math.PI + 540) % 360 - 180];
+}
+
+function viewCone(lat, lon, heading) {
+  const points = [[lat, lon]];
+  const fov = 70;
+  for (let step = 0; step <= 10; step += 1) {
+    points.push(destinationPoint(lat, lon, heading - fov / 2 + (fov * step) / 10, 36));
+  }
+  return points;
+}
+
+function mapRecords(records, focus) {
+  const located = records.filter((record) => Number.isFinite(record.lat) && Number.isFinite(record.lon));
+  if (focus.spotId) return located.filter((record) => record.spotId === focus.spotId);
+  if (focus.photoId) {
+    const one = located.find((record) => record.id === focus.photoId);
+    if (one?.spotId) return located.filter((record) => record.spotId === one.spotId);
+    return one ? [one] : [];
+  }
+  return located;
+}
+
+function closeMap() {
+  ui.mapScreen.hidden = true;
+  clearMapThumbs();
+  if (state.leafletMap) {
+    state.leafletMap.remove();
+    state.leafletMap = null;
+  }
+  if (/^#(map|spot=)/.test(location.hash)) {
+    history.replaceState(null, "", `${location.pathname}${location.search}`);
+  }
+  if (mapFromLog) {
+    mapFromLog = false;
+    ui.log.hidden = false;
+  }
+}
+
+async function openMap(focus = {}, fromHash = false) {
+  mapFromLog = !ui.log.hidden || mapFromLog;
+  ui.log.hidden = true;
+  ui.settings.hidden = true;
+  ui.mapScreen.hidden = false;
+  if (!fromHash) {
+    let hash = "#map";
+    if (focus.spotId) hash = `#spot=${encodeURIComponent(focus.spotId)}`;
+    else if (focus.photoId) hash = `#map=${encodeURIComponent(focus.photoId)}`;
+    if (location.hash !== hash) history.pushState(null, "", hash);
+  }
+  try {
+    await loadLeaflet();
+  } catch {
+    ui.mapNote.textContent = "地圖需要連線才能載入。";
+    return;
+  }
+  const records = mapRecords(await idbAll(), focus);
+  drawMap(records, focus.photoId || "");
+}
+
+function drawMap(records, highlightId) {
+  clearMapThumbs();
+  ui.mapPhotos.replaceChildren();
+  if (state.leafletMap) {
+    state.leafletMap.remove();
+    state.leafletMap = null;
+  }
+  const map = L.map(ui.leaflet, { zoomControl: true });
+  state.leafletMap = map;
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap",
+  }).addTo(map);
+  if (!records.length) {
+    map.setView([23.7, 121], 7);
+    ui.mapNote.textContent = "這些照片還沒有坐標，地圖上不會出現。";
+    requestAnimationFrame(() => map.invalidateSize());
+    return;
+  }
+  const bounds = [];
+  for (const record of records) {
+    const selected = record.id === highlightId;
+    const heading = Number.isFinite(record.heading) ? record.heading : null;
+    const upward = record.direction === "up" || (Number.isFinite(record.pitch) && record.pitch >= 50);
+    const downward = record.direction === "down" || (Number.isFinite(record.pitch) && record.pitch <= -50);
+    if (heading != null && !upward && !downward) {
+      L.polygon(viewCone(record.lat, record.lon, heading), {
+        color: "#e7a322",
+        weight: selected ? 3 : 1,
+        fillColor: "#e7a322",
+        fillOpacity: selected ? 0.45 : 0.28,
+      }).addTo(map).bindPopup(`${SPHERE_LABEL[record.direction] || "視角"} ${formatHeading(heading)}`);
+    } else {
+      L.circle([record.lat, record.lon], {
+        radius: upward ? 18 : 8,
+        color: "#e7a322",
+        weight: selected ? 3 : 1,
+        fillColor: "#e7a322",
+        fillOpacity: upward ? 0.18 : 0.35,
+      }).addTo(map).bindPopup(upward ? "朝上" : downward ? "朝下" : "沒有方位角");
+    }
+    bounds.push([record.lat, record.lon]);
+    if (record.blob) {
+      const url = URL.createObjectURL(record.blob);
+      state.mapUrls.push(url);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.classList.toggle("is-on", selected);
+      button.title = SPHERE_LABEL[record.direction] || record.filename || "照片";
+      const image = document.createElement("img");
+      image.alt = button.title;
+      image.src = url;
+      button.append(image);
+      button.addEventListener("click", () => {
+        map.setView([record.lat, record.lon], 18);
+      });
+      ui.mapPhotos.append(button);
+    }
+  }
+  if (bounds.length === 1) map.setView(bounds[0], 18);
+  else map.fitBounds(bounds, { padding: [28, 28], maxZoom: 18 });
+  ui.mapNote.textContent = `${records.length} 張有位置。扇形是水平視角，圓形是朝上或朝下。`;
+  requestAnimationFrame(() => map.invalidateSize());
+}
+
+function handleHash() {
+  const hash = location.hash;
+  if (/^#record=/.test(hash)) {
+    showRecord(recordIdFromHash());
+    return;
+  }
+  if (hash === "#map") {
+    openMap({}, true);
+    return;
+  }
+  if (hash.startsWith("#map=")) {
+    openMap({ photoId: decodeURIComponent(hash.slice(5)) }, true);
+    return;
+  }
+  if (hash.startsWith("#spot=")) {
+    openMap({ spotId: decodeURIComponent(hash.slice(6)) }, true);
+  }
+}
+
+ui.sphereToggle.addEventListener("click", toggleSphere);
+ui.sphereSlots.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-slot]");
+  if (!button || !state.sphere) return;
+  state.sphere.manual = button.dataset.slot;
+  state.sphereSignature = "";
+  renderSphere();
 });
+ui.logMap.addEventListener("click", () => openMap({}));
+ui.mapClose.addEventListener("click", closeMap);
+
+window.addEventListener("hashchange", handleHash);
 
 applyGrid();
 renderStatus();
 tickClock();
-
-const initialRecord = recordIdFromHash();
-if (initialRecord) showRecord(initialRecord);
+handleHash();
