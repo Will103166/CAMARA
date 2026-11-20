@@ -21,16 +21,19 @@
     <section id="gate" class="gate">
       <p class="eyebrow">現場記錄</p>
       <h1>時間相機</h1>
-      <p class="lede">按下快門後，把拍攝時間、座標、地點和天氣寫進照片。</p>
+      <p class="lede">按下快門後，把拍攝時間、坐標、地點和天氣寫進照片。</p>
       <div class="stack">
         <button id="start" class="primary" type="button">開啟相機</button>
+        <button id="gate-log" class="ghost" type="button">今日紀錄</button>
         <button id="install" class="ghost" type="button" hidden>安裝到主畫面</button>
       </div>
       <p id="gate-note" class="fine">相機與定位會先詢問權限。地點與天氣需要連線，時間以這台裝置為準。</p>
     </section>
 
     <section id="camera" class="stage" hidden>
-      <video id="preview" playsinline autoplay muted></video>
+      <div class="viewfinder">
+        <video id="preview" playsinline autoplay muted></video>
+      </div>
       <div id="grid" class="thirds" hidden>
         <span></span><span></span><span></span><span></span>
       </div>
@@ -41,11 +44,14 @@
       <p id="level-readout" class="level-readout" hidden></p>
       <div class="scrim-top">
         <p id="status" class="pill" aria-live="polite">準備中</p>
-        <button id="open-settings" class="gear" type="button" aria-label="設定">
+        <div class="scrim-actions">
+          <button id="open-log" class="chip" type="button">紀錄</button>
+          <button id="open-settings" class="gear" type="button" aria-label="設定">
           <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
             <path fill="currentColor" d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.2 7.2 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.58.22-1.12.54-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.23.4.32.64.22l2.39-.96c.5.4 1.05.72 1.63.94l.36 2.54c.05.24.26.42.5.42h3.84c.24 0 .45-.18.5-.42l.36-2.54c.58-.22 1.13-.54 1.63-.94l2.39.96c.23.1.5 0 .64-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/>
           </svg>
-        </button>
+          </button>
+        </div>
       </div>
       <div class="hud" aria-hidden="true">
         <p id="hud-clock" class="clock">--:--:--</p>
@@ -86,6 +92,7 @@
         <button id="settings-close" class="done" type="button">完成</button>
       </div>
       <div class="settings-scroll">
+        <button id="settings-log" class="ghost settings-log" type="button">今日拍攝紀錄</button>
         <label class="set-block">
           <span>字型</span>
           <select id="font">
@@ -111,6 +118,22 @@
           </select>
           <p class="hint">wttr.in 若被瀏覽器擋住，會改查 Open-Meteo。</p>
         </label>
+        <label class="set-block">
+          <span>坐標系統</span>
+          <select id="coord-system">
+            <option value="wgs84">WGS84</option>
+            <option value="twd97-121">TWD97（121）</option>
+            <option value="twd97-119">TWD97（119）</option>
+          </select>
+          <p class="hint">121 用於臺灣本島，119 用於澎湖、金門、馬祖。照片上的坐標會跟著這個選擇。</p>
+        </label>
+        <div class="set-row">
+          <span>年制</span>
+          <div class="segment" role="group" aria-label="年制">
+            <button id="era-ad" type="button" class="is-on" aria-pressed="true">西元</button>
+            <button id="era-roc" type="button" aria-pressed="false">民國</button>
+          </div>
+        </div>
         <div class="set-row">
           <span>時間格式</span>
           <div class="segment" role="group" aria-label="時間格式">
@@ -119,14 +142,70 @@
           </div>
         </div>
         <div class="set-row">
+          <span>星期</span>
+          <div class="segment cols-3" role="group" aria-label="星期">
+            <button id="week-off" type="button" aria-pressed="false">關</button>
+            <button id="week-full" type="button" class="is-on" aria-pressed="true">星期</button>
+            <button id="week-short" type="button" aria-pressed="false">週</button>
+          </div>
+        </div>
+        <div class="set-row">
+          <span>時</span>
+          <button id="hour-toggle" class="switch is-on" type="button" aria-pressed="true" aria-label="時"><i></i></button>
+        </div>
+        <div class="set-row">
+          <span>分</span>
+          <button id="minute-toggle" class="switch is-on" type="button" aria-pressed="true" aria-label="分"><i></i></button>
+        </div>
+        <div class="set-row">
+          <span>秒</span>
+          <button id="second-toggle" class="switch is-on" type="button" aria-pressed="true" aria-label="秒"><i></i></button>
+        </div>
+        <div class="set-row">
           <span>拍照聲</span>
           <button id="sound-toggle" class="switch" type="button" aria-pressed="true"><i></i></button>
         </div>
         <div class="set-block">
           <span>浮水印位置與順序</span>
-          <p class="hint">座標、地點、天氣和時間可以各自開關、排序，並放到照片的九個位置。同一格會由上到下排成一組。</p>
+          <p class="hint">坐標、地點、天氣和時間可以各自開關、排序，並放到照片的九個位置。同一格會由上到下排成一組。</p>
           <div id="field-list"></div>
         </div>
+      </div>
+    </section>
+
+    <section id="log" class="settings log" hidden>
+      <div class="settings-bar">
+        <h2>拍攝紀錄</h2>
+        <button id="log-close" class="done" type="button">完成</button>
+      </div>
+      <div class="log-tools">
+        <span>只看今天</span>
+        <button id="log-today" class="switch is-on" type="button" aria-pressed="true" aria-label="只看今天"><i></i></button>
+        <button id="log-copy" class="plain" type="button">複製</button>
+        <button id="log-export" class="plain" type="button">匯出 CSV</button>
+      </div>
+      <p id="log-note" class="hint">今天拍的照片會留在這台裝置上。</p>
+      <pre id="log-copybox" class="log-copybox" hidden></pre>
+      <div id="log-preview" class="log-preview" hidden>
+        <img id="log-photo" alt="紀錄中的照片">
+        <a id="log-download" class="plain log-download">下載這張</a>
+      </div>
+      <div class="log-scroll">
+        <table class="log-table">
+          <thead>
+            <tr>
+              <th>時間</th>
+              <th>地點</th>
+              <th>坐標</th>
+              <th>天氣</th>
+              <th>方位角</th>
+              <th>照片名稱</th>
+              <th>超連結</th>
+            </tr>
+          </thead>
+          <tbody id="log-body"></tbody>
+        </table>
+        <p id="log-empty" class="log-empty">今天還沒有拍攝紀錄。</p>
       </div>
     </section>
   </main>

@@ -1,4 +1,4 @@
-const CACHE = "time-cam-v2";
+const CACHE = "time-cam-v3";
 const ASSETS = [
   "./",
   "./index.html",

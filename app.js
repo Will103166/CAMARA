@@ -5,8 +5,12 @@ const FONTS = {
 };
 
 const WEEKDAYS = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
+const WEEKSHORT = ["週日", "週一", "週二", "週三", "週四", "週五", "週六"];
 const FIELD_IDS = ["time", "place", "coords", "weather"];
-const FIELD_LABEL = { time: "時間", place: "地點", coords: "座標", weather: "天氣" };
+const FIELD_LABEL = { time: "時間", place: "地點", coords: "坐標", weather: "天氣" };
+const COORD_SYSTEMS = ["wgs84", "twd97-121", "twd97-119"];
+const WEEK_MODES = ["off", "week", "zhou"];
+const LOG_HEADERS = ["時間", "地點", "坐標", "天氣", "方位角", "照片名稱", "超連結"];
 const ANCHORS = ["tl", "tc", "tr", "ml", "mc", "mr", "bl", "bc", "br"];
 const STORAGE_KEY = "timecam-settings-v1";
 
@@ -86,6 +90,30 @@ const ui = {
   levelReadout: $("level-readout"),
   zoom: $("zoom"),
   zoomLabel: $("zoom-label"),
+  gateLog: $("gate-log"),
+  openLog: $("open-log"),
+  settingsLog: $("settings-log"),
+  coordSystem: $("coord-system"),
+  eraAd: $("era-ad"),
+  eraRoc: $("era-roc"),
+  weekOff: $("week-off"),
+  weekFull: $("week-full"),
+  weekShort: $("week-short"),
+  hourToggle: $("hour-toggle"),
+  minuteToggle: $("minute-toggle"),
+  secondToggle: $("second-toggle"),
+  log: $("log"),
+  logClose: $("log-close"),
+  logToday: $("log-today"),
+  logCopy: $("log-copy"),
+  logExport: $("log-export"),
+  logNote: $("log-note"),
+  logCopybox: $("log-copybox"),
+  logPreview: $("log-preview"),
+  logPhoto: $("log-photo"),
+  logDownload: $("log-download"),
+  logBody: $("log-body"),
+  logEmpty: $("log-empty"),
 };
 
 const state = {
@@ -110,9 +138,22 @@ const state = {
   zoomMax: 4,
   pendingZoom: 1,
   zoomFrame: 0,
+  hwZoom: 1,
+  hwTimer: 0,
+  hwBusy: false,
+  hwPending: false,
   pinch: null,
   audio: null,
   sawOrientation: false,
+  orientFrame: 0,
+  pendingRoll: null,
+  levelText: "",
+  levelShown: null,
+  heading: null,
+  logTodayOnly: true,
+  logRows: [],
+  logObjectUrl: "",
+  capturedHeading: null,
 };
 
 let deferredInstall = null;
@@ -127,25 +168,88 @@ function fontFamily() {
 }
 
 function formatClock(date) {
-  let hours = date.getHours();
-  const minutes = pad(date.getMinutes());
-  const seconds = pad(date.getSeconds());
-  if (settings.hour12) {
-    const suffix = hours < 12 ? "上午" : "下午";
-    hours = hours % 12 || 12;
-    return `${suffix} ${hours}:${minutes}:${seconds}`;
+  const parts = [];
+  if (settings.showHour) {
+    let hours = date.getHours();
+    if (settings.hour12) {
+      const suffix = hours < 12 ? "上午" : "下午";
+      hours = hours % 12 || 12;
+      parts.push(`${suffix} ${hours}`);
+    } else {
+      parts.push(pad(hours));
+    }
   }
-  return `${pad(hours)}:${minutes}:${seconds}`;
+  if (settings.showMinute) parts.push(pad(date.getMinutes()));
+  if (settings.showSecond) parts.push(pad(date.getSeconds()));
+  if (!parts.length) return "";
+  if (!settings.showHour && settings.showMinute && !settings.showSecond) return `${parts[0]}分`;
+  if (!settings.showHour && !settings.showMinute && settings.showSecond) return `${parts[0]}秒`;
+  if (settings.showHour && !settings.hour12 && !settings.showMinute && !settings.showSecond) return `${parts[0]}時`;
+  if (settings.showHour && settings.hour12) {
+    const [first, ...rest] = parts;
+    return rest.length ? `${first}:${rest.join(":")}` : first;
+  }
+  return parts.join(":");
 }
 
 function formatWhen(date) {
-  return `${date.getFullYear()}.${pad(date.getMonth() + 1)}.${pad(date.getDate())}  ${WEEKDAYS[date.getDay()]}  ${formatClock(date)}`;
+  const year = settings.era === "roc" ? date.getFullYear() - 1911 : date.getFullYear();
+  const yearText = settings.era === "roc" ? `民國${year}` : String(year);
+  const parts = [`${yearText}.${pad(date.getMonth() + 1)}.${pad(date.getDate())}`];
+  if (settings.weekMode === "week") parts.push(WEEKDAYS[date.getDay()]);
+  if (settings.weekMode === "zhou") parts.push(WEEKSHORT[date.getDay()]);
+  const clock = formatClock(date);
+  if (clock) parts.push(clock);
+  return parts.join("  ");
+}
+
+function toTwd97(latDeg, lonDeg, lon0Deg) {
+  const a = 6378.137;
+  const f = 1 / 298.257222101;
+  const k0 = 0.9999;
+  const n = f / (2 - f);
+  const rectifying = (a / (1 + n)) * (1 + (n ** 2) / 4 + (n ** 4) / 64);
+  const alpha1 = n / 2 - (2 * n ** 2) / 3 + (5 * n ** 3) / 16;
+  const alpha2 = (13 * n ** 2) / 48 - (3 * n ** 3) / 5;
+  const alpha3 = (61 * n ** 3) / 240;
+  const lat = (latDeg * Math.PI) / 180;
+  const lon = ((lonDeg - lon0Deg) * Math.PI) / 180;
+  const rootN = Math.sqrt(n);
+  const t = Math.sinh(
+    Math.atanh(Math.sin(lat)) - ((2 * rootN) / (1 + n)) * Math.atanh(((2 * rootN) / (1 + n)) * Math.sin(lat))
+  );
+  const xi = Math.atan(t / Math.cos(lon));
+  const eta = Math.atan(Math.sin(lon) / Math.sqrt(1 + t * t));
+  const east = 250 + k0 * rectifying * (
+    eta
+    + alpha1 * Math.cos(2 * xi) * Math.sinh(2 * eta)
+    + alpha2 * Math.cos(4 * xi) * Math.sinh(4 * eta)
+    + alpha3 * Math.cos(6 * xi) * Math.sinh(6 * eta)
+  );
+  const north = k0 * rectifying * (
+    xi
+    + alpha1 * Math.sin(2 * xi) * Math.cosh(2 * eta)
+    + alpha2 * Math.sin(4 * xi) * Math.cosh(4 * eta)
+    + alpha3 * Math.sin(6 * xi) * Math.cosh(6 * eta)
+  );
+  return { east: east * 1000, north: north * 1000 };
 }
 
 function formatCoords(lat, lon) {
+  if (settings.coordSystem === "twd97-121" || settings.coordSystem === "twd97-119") {
+    const zone = settings.coordSystem === "twd97-119" ? 119 : 121;
+    const { east, north } = toTwd97(lat, lon, zone);
+    return `TWD97／${zone}  E${east.toFixed(2)}  N${north.toFixed(2)}`;
+  }
   const latHem = lat >= 0 ? "N" : "S";
   const lonHem = lon >= 0 ? "E" : "W";
   return `${Math.abs(lat).toFixed(6)}°${latHem}  ${Math.abs(lon).toFixed(6)}°${lonHem}`;
+}
+
+function formatHeading(value) {
+  if (!Number.isFinite(value)) return "";
+  const deg = ((value % 360) + 360) % 360;
+  return `${Math.round(deg)}°`;
 }
 
 function filenameFor(date) {
@@ -183,6 +287,12 @@ function loadSettings() {
     weatherSource: "open-meteo",
     hour12: false,
     shutterSound: true,
+    era: "ad",
+    weekMode: "week",
+    showHour: true,
+    showMinute: true,
+    showSecond: true,
+    coordSystem: "wgs84",
     fields: DEFAULT_FIELDS.map((field) => ({ ...field })),
   };
   try {
@@ -197,6 +307,12 @@ function loadSettings() {
       weatherSource,
       hour12: Boolean(saved.hour12),
       shutterSound: saved.shutterSound !== false,
+      era: saved.era === "roc" ? "roc" : "ad",
+      weekMode: WEEK_MODES.includes(saved.weekMode) ? saved.weekMode : "week",
+      showHour: saved.showHour !== false,
+      showMinute: saved.showMinute !== false,
+      showSecond: saved.showSecond !== false,
+      coordSystem: COORD_SYSTEMS.includes(saved.coordSystem) ? saved.coordSystem : "wgs84",
       fields: normalizeFields(saved.fields || base.fields),
     };
   } catch {
@@ -252,7 +368,15 @@ function renderStatus() {
 }
 
 function tickClock() {
-  ui.hudClock.textContent = formatClock(new Date());
+  ui.hudClock.textContent = formatWhen(new Date());
+}
+
+function ensureClock() {
+  clearInterval(state.clockTimer);
+  state.clockTimer = 0;
+  tickClock();
+  if (ui.camera.hidden) return;
+  state.clockTimer = setInterval(tickClock, settings.showSecond ? 250 : 1000);
 }
 
 function updateSample() {
@@ -280,6 +404,20 @@ function syncSettingsForm() {
   ui.hour12.classList.toggle("is-on", settings.hour12);
   ui.hour24.setAttribute("aria-pressed", String(!settings.hour12));
   ui.hour12.setAttribute("aria-pressed", String(settings.hour12));
+  ui.eraAd.classList.toggle("is-on", settings.era !== "roc");
+  ui.eraRoc.classList.toggle("is-on", settings.era === "roc");
+  ui.eraAd.setAttribute("aria-pressed", String(settings.era !== "roc"));
+  ui.eraRoc.setAttribute("aria-pressed", String(settings.era === "roc"));
+  ui.weekOff.classList.toggle("is-on", settings.weekMode === "off");
+  ui.weekFull.classList.toggle("is-on", settings.weekMode === "week");
+  ui.weekShort.classList.toggle("is-on", settings.weekMode === "zhou");
+  ui.weekOff.setAttribute("aria-pressed", String(settings.weekMode === "off"));
+  ui.weekFull.setAttribute("aria-pressed", String(settings.weekMode === "week"));
+  ui.weekShort.setAttribute("aria-pressed", String(settings.weekMode === "zhou"));
+  setSwitch(ui.hourToggle, settings.showHour);
+  setSwitch(ui.minuteToggle, settings.showMinute);
+  setSwitch(ui.secondToggle, settings.showSecond);
+  ui.coordSystem.value = settings.coordSystem;
   setSwitch(ui.soundToggle, settings.shutterSound);
   updateSample();
   renderFields();
@@ -521,9 +659,27 @@ function stopStream() {
 }
 
 function updatePreviewTransform() {
-  const zoom = state.zoomMode === "digital" ? state.zoom : 1;
+  let zoom = state.zoom;
+  if (state.zoomMode === "hardware") {
+    const base = state.hwZoom > 0 ? state.hwZoom : 1;
+    zoom = state.zoom / base;
+  }
   const x = state.facing === "user" ? -zoom : zoom;
-  ui.preview.style.transform = `scale(${x}, ${zoom})`;
+  ui.preview.style.transform = `translate3d(0,0,0) scale(${x}, ${zoom})`;
+}
+
+function useDigitalZoom(min, max) {
+  state.zoomMode = "digital";
+  state.zoomMin = min;
+  state.zoomMax = max;
+  state.hwZoom = 1;
+  state.zoom = Math.min(max, Math.max(min, state.zoom || min));
+  ui.zoom.min = String(min);
+  ui.zoom.max = String(max);
+  ui.zoom.step = "0.1";
+  ui.zoom.value = String(state.zoom);
+  ui.zoomLabel.textContent = `${state.zoom.toFixed(1)}×`;
+  updatePreviewTransform();
 }
 
 function readZoomRange() {
@@ -533,52 +689,76 @@ function readZoomRange() {
   } catch {
     caps = {};
   }
-  if (Number.isFinite(caps.zoom?.min) && Number.isFinite(caps.zoom?.max) && caps.zoom.max > caps.zoom.min) {
-    state.zoomMode = "hardware";
-    state.zoomMin = caps.zoom.min;
-    state.zoomMax = caps.zoom.max;
-    ui.zoom.step = String(caps.zoom.step || 0.1);
-  } else {
-    state.zoomMode = "digital";
-    state.zoomMin = 1;
-    state.zoomMax = 4;
-    ui.zoom.step = "0.1";
+  const hardwareOk = !/Windows/i.test(navigator.userAgent)
+    && Number.isFinite(caps.zoom?.min)
+    && Number.isFinite(caps.zoom?.max)
+    && caps.zoom.max > caps.zoom.min + 0.05;
+  if (!hardwareOk) {
+    useDigitalZoom(1, 4);
+    return;
   }
+  state.zoomMode = "hardware";
+  state.zoomMin = caps.zoom.min;
+  state.zoomMax = caps.zoom.max;
+  state.hwZoom = Number.isFinite(caps.zoom.min) ? caps.zoom.min : 1;
+  state.zoom = state.zoomMin;
   ui.zoom.min = String(state.zoomMin);
   ui.zoom.max = String(state.zoomMax);
-  state.zoom = state.zoomMin;
+  ui.zoom.step = String(Math.min(Math.max(caps.zoom.step || 0.1, 0.05), 0.2));
   ui.zoom.value = String(state.zoom);
   ui.zoomLabel.textContent = `${state.zoom.toFixed(1)}×`;
   updatePreviewTransform();
 }
 
-async function applyZoom(value) {
+function setZoom(value, fromSlider) {
   const zoom = Math.min(state.zoomMax, Math.max(state.zoomMin, value));
   state.zoom = zoom;
-  ui.zoom.value = String(zoom);
-  ui.zoomLabel.textContent = `${zoom.toFixed(1)}×`;
-  if (state.zoomMode === "hardware" && state.stream) {
-    try {
-      await state.stream.getVideoTracks()[0].applyConstraints({ advanced: [{ zoom }] });
-      updatePreviewTransform();
-      return;
-    } catch {
-      state.zoomMode = "digital";
-      state.zoomMin = 1;
-      state.zoomMax = 4;
-      ui.zoom.min = "1";
-      ui.zoom.max = "4";
-    }
-  }
+  if (!fromSlider) ui.zoom.value = String(zoom);
+  const label = `${zoom.toFixed(1)}×`;
+  if (ui.zoomLabel.textContent !== label) ui.zoomLabel.textContent = label;
   updatePreviewTransform();
+  if (state.zoomMode !== "hardware") return;
+  clearTimeout(state.hwTimer);
+  state.hwTimer = setTimeout(() => {
+    state.hwTimer = 0;
+    commitHardwareZoom();
+  }, 280);
 }
 
-function queueZoom(value) {
+async function commitHardwareZoom() {
+  if (state.zoomMode !== "hardware" || !state.stream) return;
+  if (state.hwBusy) {
+    state.hwPending = true;
+    return;
+  }
+  const zoom = state.zoom;
+  if (Math.abs(zoom - state.hwZoom) < 0.03) {
+    updatePreviewTransform();
+    return;
+  }
+  state.hwBusy = true;
+  try {
+    await state.stream.getVideoTracks()[0].applyConstraints({ advanced: [{ zoom }] });
+    state.hwZoom = zoom;
+  } catch {
+    useDigitalZoom(1, 4);
+  } finally {
+    state.hwBusy = false;
+    updatePreviewTransform();
+    if (state.hwPending) {
+      state.hwPending = false;
+      commitHardwareZoom();
+    }
+  }
+}
+
+function queueZoom(value, fromSlider) {
   state.pendingZoom = value;
+  state.pendingFromSlider = Boolean(fromSlider);
   if (state.zoomFrame) return;
   state.zoomFrame = requestAnimationFrame(() => {
     state.zoomFrame = 0;
-    applyZoom(state.pendingZoom);
+    setZoom(state.pendingZoom, state.pendingFromSlider);
   });
 }
 
@@ -623,19 +803,60 @@ function rollFromEvent(event) {
   return event.gamma;
 }
 
+function headingFromEvent(event) {
+  if (Number.isFinite(event.webkitCompassHeading)) return event.webkitCompassHeading;
+  if (event.absolute !== true && event.type !== "deviceorientationabsolute") return null;
+  if (!Number.isFinite(event.alpha) || !Number.isFinite(event.beta) || !Number.isFinite(event.gamma)) return null;
+  const rad = Math.PI / 180;
+  const cX = Math.cos(event.beta * rad);
+  const cY = Math.cos(event.gamma * rad);
+  const cZ = Math.cos(event.alpha * rad);
+  const sX = Math.sin(event.beta * rad);
+  const sY = Math.sin(event.gamma * rad);
+  const sZ = Math.sin(event.alpha * rad);
+  const vx = -cZ * sY - sZ * sX * cY;
+  const vy = -sZ * sY + cZ * sX * cY;
+  let heading = Math.atan2(vx, vy) * (180 / Math.PI);
+  if (heading < 0) heading += 360;
+  return heading;
+}
+
+function paintLevel() {
+  state.orientFrame = 0;
+  const roll = state.pendingRoll;
+  if (!Number.isFinite(roll) || ui.camera.hidden) return;
+  const level = Math.abs(roll) < 1.5;
+  const text = level ? "水平" : `${Math.abs(roll).toFixed(0)}°`;
+  const shown = level ? 0 : -roll;
+  if (ui.level.hidden) {
+    ui.level.hidden = false;
+    ui.levelMark.hidden = false;
+    ui.levelReadout.hidden = false;
+  }
+  if (ui.level.classList.contains("is-level") !== level) {
+    ui.level.classList.toggle("is-level", level);
+    ui.levelMark.classList.toggle("is-level", level);
+    ui.levelReadout.classList.toggle("is-level", level);
+  }
+  if (state.levelText !== text) {
+    state.levelText = text;
+    ui.levelReadout.textContent = text;
+  }
+  if (state.levelShown == null || Math.abs(state.levelShown - shown) > 0.35) {
+    state.levelShown = shown;
+    ui.levelLine.style.transform = `rotate(${shown}deg)`;
+  }
+}
+
 function onOrientation(event) {
   const roll = rollFromEvent(event);
-  if (!Number.isFinite(roll)) return;
-  state.sawOrientation = true;
-  const level = Math.abs(roll) < 1.5;
-  ui.level.hidden = false;
-  ui.levelMark.hidden = false;
-  ui.levelReadout.hidden = false;
-  ui.level.classList.toggle("is-level", level);
-  ui.levelMark.classList.toggle("is-level", level);
-  ui.levelReadout.classList.toggle("is-level", level);
-  ui.levelLine.style.transform = `rotate(${level ? 0 : -roll}deg)`;
-  ui.levelReadout.textContent = level ? "水平" : `${Math.abs(roll).toFixed(0)}°`;
+  if (Number.isFinite(roll)) {
+    state.sawOrientation = true;
+    state.pendingRoll = roll;
+    if (!state.orientFrame) state.orientFrame = requestAnimationFrame(paintLevel);
+  }
+  const heading = headingFromEvent(event);
+  if (Number.isFinite(heading)) state.heading = heading;
 }
 
 async function enableLevel() {
@@ -684,7 +905,9 @@ function makeViewCanvas() {
 }
 
 function drawViewfinder(ctx, video, canvasW, canvasH) {
-  const zoom = state.zoomMode === "digital" ? Math.max(1, state.zoom) : 1;
+  const zoom = state.zoomMode === "hardware"
+    ? Math.max(1, state.zoom / (state.hwZoom > 0 ? state.hwZoom : 1))
+    : Math.max(1, state.zoom);
   const base = coverSource(video.videoWidth, video.videoHeight, canvasW, canvasH);
   const sw = base.sw / zoom;
   const sh = base.sh / zoom;
@@ -921,9 +1144,10 @@ function renderMeta(when, source) {
   const rows = [
     ["時間", formatWhen(when)],
     ["來源", source],
-    ["座標", state.coords ? formatCoords(state.coords.lat, state.coords.lon) : "沒有"],
+    ["坐標", state.coords ? formatCoords(state.coords.lat, state.coords.lon) : "沒有"],
     ["地點", state.place || "沒有"],
     ["天氣", state.weather || "沒有"],
+    ["方位角", formatHeading(state.capturedHeading) || "沒有"],
   ];
   ui.meta.replaceChildren();
   for (const [label, value] of rows) {
@@ -943,6 +1167,7 @@ async function present(canvas, when, source) {
   ui.shot.src = state.objectUrl;
   renderMeta(when, source);
   show("result");
+  saveRecord(when, source).catch(() => showToast("這張沒有寫進拍攝紀錄"));
 }
 
 function playShutter() {
@@ -977,6 +1202,7 @@ async function captureVideo() {
   ui.shutter.disabled = true;
   playShutter();
   const when = new Date();
+  state.capturedHeading = state.heading;
   try {
     const canvas = makeViewCanvas();
     drawViewfinder(canvas.getContext("2d"), ui.preview, canvas.width, canvas.height);
@@ -994,6 +1220,7 @@ async function captureBitmap(bitmap, source) {
   if (state.busy) return;
   state.busy = true;
   const when = new Date();
+  state.capturedHeading = state.heading;
   try {
     const canvas = makeCanvas(bitmap.width, bitmap.height);
     drawContain(canvas.getContext("2d"), bitmap, bitmap.width, bitmap.height, canvas.width, canvas.height);
@@ -1056,9 +1283,7 @@ async function onStart() {
   }
   show("camera");
   applyGrid();
-  tickClock();
-  clearInterval(state.clockTimer);
-  state.clockTimer = setInterval(tickClock, 250);
+  ensureClock();
   startLocation();
   await enableLevel();
   renderStatus();
@@ -1122,13 +1347,7 @@ ui.weatherSource.addEventListener("change", () => {
 
 function setHour12(hour12) {
   settings.hour12 = hour12;
-  ui.hour24.classList.toggle("is-on", !hour12);
-  ui.hour12.classList.toggle("is-on", hour12);
-  ui.hour24.setAttribute("aria-pressed", String(!hour12));
-  ui.hour12.setAttribute("aria-pressed", String(hour12));
-  saveSettings();
-  tickClock();
-  updateSample();
+  applyTimeChange();
 }
 
 ui.hour24.addEventListener("click", () => setHour12(false));
@@ -1166,7 +1385,7 @@ ui.fieldList.addEventListener("change", (event) => {
   renderStatus();
 });
 
-ui.zoom.addEventListener("input", () => applyZoom(Number(ui.zoom.value)));
+ui.zoom.addEventListener("input", () => queueZoom(Number(ui.zoom.value), true));
 
 ui.camera.addEventListener("touchstart", (event) => {
   if (event.touches.length === 2) {
@@ -1218,11 +1437,15 @@ ui.save.addEventListener("click", saveToAlbum);
 ui.share.addEventListener("click", shareBlob);
 
 window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !ui.log.hidden) {
+    closeLog();
+    return;
+  }
   if (event.key === "Escape" && !ui.settings.hidden) {
     closeSettings();
     return;
   }
-  if (event.code === "Space" && !ui.camera.hidden && ui.settings.hidden) {
+  if (event.code === "Space" && !ui.camera.hidden && ui.settings.hidden && ui.log.hidden) {
     event.preventDefault();
     captureVideo();
   }
@@ -1250,6 +1473,368 @@ if ("serviceWorker" in navigator && window.isSecureContext) {
   navigator.serviceWorker.register("./sw.js").catch(() => {});
 }
 
+let logFromSettings = false;
+let dbPromise = null;
+
+function openDb() {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open("timecam-log", 1);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains("shots")) {
+        database.createObjectStore("shots", { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => {
+      dbPromise = null;
+      reject(request.error);
+    };
+  });
+  return dbPromise;
+}
+
+function idbPut(record) {
+  return openDb().then((database) => new Promise((resolve, reject) => {
+    const tx = database.transaction("shots", "readwrite");
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.objectStore("shots").put(record);
+  }));
+}
+
+function idbAll() {
+  return openDb().then((database) => new Promise((resolve, reject) => {
+    const request = database.transaction("shots", "readonly").objectStore("shots").getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  }));
+}
+
+function idbGet(id) {
+  return openDb().then((database) => new Promise((resolve, reject) => {
+    const request = database.transaction("shots", "readonly").objectStore("shots").get(id);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  }));
+}
+
+function idbDelete(id) {
+  return openDb().then((database) => new Promise((resolve, reject) => {
+    const tx = database.transaction("shots", "readwrite");
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.objectStore("shots").delete(id);
+  }));
+}
+
+async function saveRecord(when, source) {
+  if (!state.blob) return;
+  const id = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await idbPut({
+    id,
+    takenAt: when.toISOString(),
+    place: state.place || "",
+    lat: Number.isFinite(state.coords?.lat) ? state.coords.lat : null,
+    lon: Number.isFinite(state.coords?.lon) ? state.coords.lon : null,
+    weather: state.weather || "",
+    heading: Number.isFinite(state.capturedHeading) ? state.capturedHeading : null,
+    filename: state.filename,
+    source,
+    blob: state.blob,
+  });
+}
+
+function sameLocalDay(iso, now = new Date()) {
+  const date = new Date(iso);
+  return date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
+}
+
+function recordLink(id) {
+  const url = new URL(location.href);
+  url.hash = `record=${encodeURIComponent(id)}`;
+  return url.href;
+}
+
+function recordIdFromHash() {
+  const match = location.hash.match(/^#record=(.+)$/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+function rowValues(record) {
+  const when = new Date(record.takenAt);
+  const coords = Number.isFinite(record.lat) && Number.isFinite(record.lon)
+    ? formatCoords(record.lat, record.lon)
+    : "";
+  return [
+    Number.isNaN(when.getTime()) ? "—" : formatWhen(when),
+    record.place || "—",
+    coords || "—",
+    record.weather || "—",
+    formatHeading(record.heading) || "—",
+    record.filename || "—",
+    recordLink(record.id),
+  ];
+}
+
+function visibleRecords(records) {
+  const list = records
+    .filter((record) => record?.takenAt)
+    .sort((a, b) => String(b.takenAt).localeCompare(String(a.takenAt)));
+  return state.logTodayOnly ? list.filter((record) => sameLocalDay(record.takenAt)) : list;
+}
+
+function setLogNote(message) {
+  ui.logNote.textContent = message;
+}
+
+async function renderLog() {
+  ui.logCopybox.hidden = true;
+  let records = [];
+  try {
+    records = visibleRecords(await idbAll());
+  } catch {
+    state.logRows = [];
+    ui.logBody.replaceChildren();
+    ui.logEmpty.hidden = false;
+    ui.logEmpty.textContent = "紀錄讀取失敗。";
+    setLogNote("這台瀏覽器沒有打開本機紀錄。");
+    return;
+  }
+  state.logRows = records;
+  ui.logBody.replaceChildren();
+  ui.logEmpty.hidden = records.length > 0;
+  ui.logEmpty.textContent = state.logTodayOnly ? "今天還沒有拍攝紀錄。" : "還沒有拍攝紀錄。";
+  setLogNote(state.logTodayOnly
+    ? `今天 ${records.length} 張。時間、地點、坐標、天氣和方位角可複製或匯出。`
+    : `全部 ${records.length} 張。`);
+  for (const record of records) {
+    const tr = document.createElement("tr");
+    const values = rowValues(record);
+    values.forEach((value, index) => {
+      const td = document.createElement("td");
+      if (index === values.length - 1) {
+        const link = document.createElement("a");
+        link.href = value;
+        link.textContent = "開啟";
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "linkish";
+        del.dataset.delete = record.id;
+        del.textContent = "刪除";
+        td.append(link, del);
+      } else {
+        td.textContent = value;
+      }
+      tr.append(td);
+    });
+    ui.logBody.append(tr);
+  }
+}
+
+function openLog() {
+  logFromSettings = !ui.settings.hidden;
+  ui.settings.hidden = true;
+  ui.log.hidden = false;
+  setSwitch(ui.logToday, state.logTodayOnly);
+  return renderLog();
+}
+
+function closeLog() {
+  ui.log.hidden = true;
+  ui.logPreview.hidden = true;
+  if (state.logObjectUrl) {
+    URL.revokeObjectURL(state.logObjectUrl);
+    state.logObjectUrl = "";
+  }
+  if (logFromSettings) {
+    logFromSettings = false;
+    ui.settings.hidden = false;
+  }
+}
+
+async function showRecord(id) {
+  if (!id) return;
+  let record = null;
+  try {
+    record = await idbGet(id);
+  } catch {
+    record = null;
+  }
+  if (!record?.blob) {
+    if (ui.log.hidden) await openLog();
+    setLogNote("找不到這張照片，可能已刪除。");
+    return;
+  }
+  if (ui.log.hidden) openLog();
+  if (state.logObjectUrl) URL.revokeObjectURL(state.logObjectUrl);
+  state.logObjectUrl = URL.createObjectURL(record.blob);
+  ui.logPhoto.src = state.logObjectUrl;
+  ui.logDownload.href = state.logObjectUrl;
+  ui.logDownload.download = record.filename || "photo.jpg";
+  ui.logPreview.hidden = false;
+}
+
+function tableText(records) {
+  const lines = [LOG_HEADERS.join("\t")];
+  for (const record of records) lines.push(rowValues(record).join("\t"));
+  return lines.join("\n");
+}
+
+function csvCell(value) {
+  const text = String(value ?? "");
+  if (/[",\n\r]/.test(text)) return `"${text.replace(/"/g, "\"\"")}"`;
+  return text;
+}
+
+function csvText(records) {
+  const lines = [LOG_HEADERS.map(csvCell).join(",")];
+  for (const record of records) lines.push(rowValues(record).map(csvCell).join(","));
+  return `\uFEFF${lines.join("\r\n")}`;
+}
+
+function selectCopybox() {
+  const range = document.createRange();
+  range.selectNodeContents(ui.logCopybox);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+async function copyLog() {
+  const text = tableText(state.logRows);
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(text);
+    copied = true;
+  } catch {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.append(area);
+    area.focus();
+    area.select();
+    try {
+      copied = document.execCommand("copy");
+    } catch {
+      copied = false;
+    }
+    area.remove();
+  }
+  if (copied) {
+    ui.logCopybox.hidden = true;
+    setLogNote(`已複製 ${state.logRows.length} 列，可直接貼到試算表。`);
+    return;
+  }
+  ui.logCopybox.hidden = false;
+  ui.logCopybox.textContent = text;
+  selectCopybox();
+  setLogNote("瀏覽器沒有允許自動複製，下面這段已選取，可再複製一次。");
+}
+
+function exportLog() {
+  const blob = new Blob([csvText(state.logRows)], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const now = new Date();
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `時間相機紀錄_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}.csv`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+  setLogNote(`已匯出 ${state.logRows.length} 列。`);
+}
+
+function applyTimeChange() {
+  syncSettingsForm();
+  saveSettings();
+  ensureClock();
+  renderStatus();
+  if (!ui.log.hidden) renderLog();
+}
+
+ui.coordSystem.addEventListener("change", () => {
+  settings.coordSystem = COORD_SYSTEMS.includes(ui.coordSystem.value) ? ui.coordSystem.value : "wgs84";
+  applyTimeChange();
+});
+
+ui.eraAd.addEventListener("click", () => {
+  settings.era = "ad";
+  applyTimeChange();
+});
+
+ui.eraRoc.addEventListener("click", () => {
+  settings.era = "roc";
+  applyTimeChange();
+});
+
+ui.weekOff.addEventListener("click", () => {
+  settings.weekMode = "off";
+  applyTimeChange();
+});
+
+ui.weekFull.addEventListener("click", () => {
+  settings.weekMode = "week";
+  applyTimeChange();
+});
+
+ui.weekShort.addEventListener("click", () => {
+  settings.weekMode = "zhou";
+  applyTimeChange();
+});
+
+ui.hourToggle.addEventListener("click", () => {
+  settings.showHour = !settings.showHour;
+  applyTimeChange();
+});
+
+ui.minuteToggle.addEventListener("click", () => {
+  settings.showMinute = !settings.showMinute;
+  applyTimeChange();
+});
+
+ui.secondToggle.addEventListener("click", () => {
+  settings.showSecond = !settings.showSecond;
+  applyTimeChange();
+});
+
+ui.gateLog.addEventListener("click", openLog);
+ui.openLog.addEventListener("click", openLog);
+ui.settingsLog.addEventListener("click", openLog);
+ui.logClose.addEventListener("click", closeLog);
+ui.logToday.addEventListener("click", () => {
+  state.logTodayOnly = !state.logTodayOnly;
+  setSwitch(ui.logToday, state.logTodayOnly);
+  renderLog();
+});
+ui.logCopy.addEventListener("click", copyLog);
+ui.logExport.addEventListener("click", exportLog);
+ui.logBody.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-delete]");
+  if (!button) return;
+  const id = button.dataset.delete;
+  try {
+    await idbDelete(id);
+    if (recordIdFromHash() === id) history.replaceState(null, "", `${location.pathname}${location.search}`);
+    ui.logPreview.hidden = true;
+    await renderLog();
+  } catch {
+    setLogNote("這筆沒有刪掉。");
+  }
+});
+
+window.addEventListener("hashchange", () => {
+  const id = recordIdFromHash();
+  if (id) showRecord(id);
+});
+
 applyGrid();
 renderStatus();
 tickClock();
+
+const initialRecord = recordIdFromHash();
+if (initialRecord) showRecord(initialRecord);
