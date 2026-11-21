@@ -1,7 +1,7 @@
 const FONTS = {
-  sans: '"Microsoft JhengHei", "PingFang TC", "Noto Sans TC", system-ui, sans-serif',
-  serif: '"PMingLiU", "Songti TC", "Noto Serif TC", serif',
-  system: '"Microsoft JhengHei", "PingFang TC", system-ui, sans-serif',
+  sans: '"Noto Sans TC", "Microsoft JhengHei", sans-serif',
+  serif: '"Noto Serif TC", "PMingLiU", serif',
+  system: '"Microsoft JhengHei", "PingFang TC", "Noto Sans TC", sans-serif',
 };
 
 const WEEKDAYS = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
@@ -15,6 +15,10 @@ const SPHERE_ORDER = ["front", "right", "back", "left", "up", "down"];
 const SPHERE_LABEL = { front: "前", right: "右", back: "後", left: "左", up: "上", down: "下" };
 const ANCHORS = ["tl", "tc", "tr", "ml", "mc", "mr", "bl", "bc", "br"];
 const STORAGE_KEY = "timecam-settings-v1";
+const DEFAULT_GOOGLE_CLIENT_ID = "96826332482-p3r4ico20m3ki9bttp7ff0rt2qk0317f.apps.googleusercontent.com";
+const GOOGLE_EMAIL_KEY = "timecam-google-email";
+const DELETED_KEY = "timecam-deleted-v1";
+const DRIVE_INDEX = "timecam-index.json";
 
 const WEATHER = {
   0: "晴",
@@ -193,10 +197,6 @@ const googleAuth = {
   email: localStorage.getItem("timecam-google-email") || "",
   syncing: false,
 };
-const GOOGLE_EMAIL_KEY = "timecam-google-email";
-const DELETED_KEY = "timecam-deleted-v1";
-const DRIVE_INDEX = "timecam-index.json";
-const DEFAULT_GOOGLE_CLIENT_ID = "96826332482-p3r4ico20m3ki9bttp7ff0rt2qk0317f.apps.googleusercontent.com";
 
 function pad(value) {
   return String(value).padStart(2, "0");
@@ -2029,18 +2029,24 @@ function shotFileName(id) {
 
 function renderGoogleStatus(message) {
   const email = googleAuth.email;
-  ui.googleStatus.textContent = message || (email
-    ? `已綁定 ${email}。拍攝紀錄會跟這個帳號同步。`
-    : "尚未綁定。貼上 OAuth 用戶端 ID 後按綁定。");
-  ui.googleGate.hidden = !email;
-  ui.googleGate.textContent = email ? `已綁定 ${email}` : "";
-  const origin = location.origin && location.origin !== "null" ? location.origin : location.href;
-  ui.googleOrigin.textContent = origin;
+  if (ui.googleStatus) {
+    ui.googleStatus.textContent = message || (email
+      ? `已綁定 ${email}。拍攝紀錄會跟這個帳號同步。`
+      : "尚未綁定。按綁定 Google 即可同步拍攝紀錄。");
+  }
+  if (ui.googleGate) {
+    ui.googleGate.hidden = !email;
+    ui.googleGate.textContent = email ? `已綁定 ${email}` : "";
+  }
+  if (ui.googleOrigin) {
+    const origin = location.origin && location.origin !== "null" ? location.origin : location.href;
+    ui.googleOrigin.textContent = origin;
+  }
 }
 
 function setGoogleBusy(busy) {
   for (const button of [ui.googleBind, ui.googleSync, ui.googleUnbind, ui.logSync]) {
-    button.disabled = busy;
+    if (button) button.disabled = busy;
   }
 }
 

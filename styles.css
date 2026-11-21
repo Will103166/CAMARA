@@ -6,7 +6,7 @@
   --amber: #e7a322;
   --amber-ink: #2a1c04;
   color-scheme: dark;
-  font-family: "Microsoft JhengHei", "PingFang TC", "Noto Sans TC", system-ui, sans-serif;
+  font-family: "Noto Sans TC", "Microsoft JhengHei", sans-serif;
 }
 
 * { box-sizing: border-box; }
