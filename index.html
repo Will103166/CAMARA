@@ -11,10 +11,13 @@
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="icon" href="./icons/icon-192.png">
   <link rel="apple-touch-icon" href="./icons/icon-192.png">
+  <link rel="stylesheet" href="./styles.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@500;700&family=Noto+Serif+TC:wght@600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@500;700&family=Noto+Serif+TC:wght@600;700&display=swap" media="print" onload="this.media='all'">
+  <noscript>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@500;700&family=Noto+Serif+TC:wght@600;700&display=swap">
+  </noscript>
 </head>
 <body>
   <main id="app">
@@ -28,7 +31,7 @@
         <button id="install" class="ghost" type="button" hidden>安裝到主畫面</button>
       </div>
       <p id="gate-note" class="fine">相機與定位會先詢問權限。地點與天氣需要連線，時間以這台裝置為準。</p>
-      <p class="version">版本 1.1.1</p>
+      <p class="version">版本 1.1.2</p>
       <p id="google-gate" class="version" hidden></p>
     </section>
 
@@ -245,6 +248,6 @@
       <div id="map-photos" class="map-photos"></div>
     </section>
   </main>
-  <script src="./app.js"></script>
+  <script src="./app.js" defer></script>
 </body>
 </html>

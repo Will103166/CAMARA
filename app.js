@@ -1,7 +1,7 @@
 const FONTS = {
-  sans: '"Noto Sans TC", "Microsoft JhengHei", sans-serif',
-  serif: '"Noto Serif TC", "PMingLiU", serif',
-  system: '"Microsoft JhengHei", "PingFang TC", "Noto Sans TC", sans-serif',
+  sans: '"Microsoft JhengHei", "PingFang TC", "Noto Sans TC", system-ui, sans-serif',
+  serif: '"PMingLiU", "Songti TC", "Noto Serif TC", serif',
+  system: '"Microsoft JhengHei", "PingFang TC", system-ui, sans-serif',
 };
 
 const WEEKDAYS = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];

@@ -1,4 +1,4 @@
-const CACHE = "time-cam-v7";
+const CACHE = "time-cam-v8";
 const ASSETS = [
   "./",
   "./index.html",
@@ -22,24 +22,29 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+function updateCache(request) {
+  return fetch(request).then((response) => {
+    if (response && response.ok) {
+      const copy = response.clone();
+      caches.open(CACHE).then((cache) => cache.put(request, copy));
+    }
+    return response;
+  });
+}
+
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (event.request.method !== "GET" || url.origin !== self.location.origin) return;
 
   event.respondWith(
-    fetch(event.request)
-      .then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE).then((cache) => cache.put(event.request, copy));
-        return response;
-      })
-      .catch(async () => {
-        const cached = await caches.match(event.request);
-        if (cached) return cached;
-        if (event.request.mode === "navigate") {
-          return caches.match("./index.html");
-        }
+    caches.match(event.request).then((cached) => {
+      const network = updateCache(event.request).catch(() => null);
+      if (cached) return cached;
+      return network.then((response) => {
+        if (response) return response;
+        if (event.request.mode === "navigate") return caches.match("./index.html");
         throw new Error("offline");
-      })
+      });
+    })
   );
 });
