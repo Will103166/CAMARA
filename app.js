@@ -196,6 +196,7 @@ const googleAuth = {
 const GOOGLE_EMAIL_KEY = "timecam-google-email";
 const DELETED_KEY = "timecam-deleted-v1";
 const DRIVE_INDEX = "timecam-index.json";
+const DEFAULT_GOOGLE_CLIENT_ID = "96826332482-p3r4ico20m3ki9bttp7ff0rt2qk0317f.apps.googleusercontent.com";
 
 function pad(value) {
   return String(value).padStart(2, "0");
@@ -331,7 +332,7 @@ function loadSettings() {
     showMinute: true,
     showSecond: true,
     coordSystem: "wgs84",
-    googleClientId: "",
+    googleClientId: DEFAULT_GOOGLE_CLIENT_ID,
     fields: DEFAULT_FIELDS.map((field) => ({ ...field })),
   };
   try {
@@ -339,6 +340,7 @@ function loadSettings() {
     const font = FONTS[saved.font] ? saved.font : base.font;
     const textScale = Number(saved.textScale);
     const weatherSource = saved.weatherSource === "wttr" ? "wttr" : "open-meteo";
+    const googleClientId = typeof saved.googleClientId === "string" ? saved.googleClientId.trim().slice(0, 200) : "";
     return {
       font,
       textScale: Number.isFinite(textScale) ? Math.min(1.6, Math.max(0.7, textScale)) : 1,
@@ -352,7 +354,7 @@ function loadSettings() {
       showMinute: saved.showMinute !== false,
       showSecond: saved.showSecond !== false,
       coordSystem: COORD_SYSTEMS.includes(saved.coordSystem) ? saved.coordSystem : "wgs84",
-      googleClientId: typeof saved.googleClientId === "string" ? saved.googleClientId.trim().slice(0, 200) : "",
+      googleClientId: googleClientId || DEFAULT_GOOGLE_CLIENT_ID,
       fields: normalizeFields(saved.fields || base.fields),
     };
   } catch {

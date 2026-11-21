@@ -28,7 +28,7 @@
         <button id="install" class="ghost" type="button" hidden>安裝到主畫面</button>
       </div>
       <p id="gate-note" class="fine">相機與定位會先詢問權限。地點與天氣需要連線，時間以這台裝置為準。</p>
-      <p class="version">版本 1.1</p>
+      <p class="version">版本 1.1.1</p>
       <p id="google-gate" class="version" hidden></p>
     </section>
 
@@ -106,14 +106,14 @@
           <p id="google-status" class="hint">尚未綁定。</p>
           <label class="stack-field">
             <span>OAuth 用戶端 ID</span>
-            <input id="google-client" type="text" autocomplete="off" spellcheck="false" placeholder="xxxx.apps.googleusercontent.com">
+            <input id="google-client" type="text" autocomplete="off" spellcheck="false" value="96826332482-p3r4ico20m3ki9bttp7ff0rt2qk0317f.apps.googleusercontent.com" placeholder="xxxx.apps.googleusercontent.com">
           </label>
           <div class="button-row">
             <button id="google-bind" class="plain" type="button">綁定 Google</button>
             <button id="google-sync" class="plain" type="button">立即同步</button>
             <button id="google-unbind" class="plain" type="button">解除綁定</button>
           </div>
-          <p class="hint">到 Google Cloud 建立網頁應用程式的 OAuth 用戶端，啟用 Google Drive API，並把 <b id="google-origin"></b> 加到已授權的 JavaScript 來源。應用程式若還在測試，要把要登入的帳號加進測試使用者。同步只寫入這個 App 的隱藏資料夾。</p>
+          <p class="hint">用戶端 ID 已內建。請確認 Google Cloud 的已授權 JavaScript 來源包含 <b id="google-origin"></b>；若應用程式還在測試，要把要登入的帳號加進測試使用者。同步只寫入這個 App 的隱藏資料夾。</p>
         </div>
         <label class="set-block">
           <span>字型</span>
