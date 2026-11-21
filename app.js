@@ -127,6 +127,14 @@ const ui = {
   mapNote: $("map-note"),
   leaflet: $("leaflet"),
   mapPhotos: $("map-photos"),
+  googleStatus: $("google-status"),
+  googleClient: $("google-client"),
+  googleBind: $("google-bind"),
+  googleSync: $("google-sync"),
+  googleUnbind: $("google-unbind"),
+  googleOrigin: $("google-origin"),
+  googleGate: $("google-gate"),
+  logSync: $("log-sync"),
 };
 
 const state = {
@@ -179,6 +187,15 @@ const state = {
 
 let deferredInstall = null;
 let settings = loadSettings();
+const googleAuth = {
+  token: "",
+  expiresAt: 0,
+  email: localStorage.getItem("timecam-google-email") || "",
+  syncing: false,
+};
+const GOOGLE_EMAIL_KEY = "timecam-google-email";
+const DELETED_KEY = "timecam-deleted-v1";
+const DRIVE_INDEX = "timecam-index.json";
 
 function pad(value) {
   return String(value).padStart(2, "0");
@@ -314,6 +331,7 @@ function loadSettings() {
     showMinute: true,
     showSecond: true,
     coordSystem: "wgs84",
+    googleClientId: "",
     fields: DEFAULT_FIELDS.map((field) => ({ ...field })),
   };
   try {
@@ -334,6 +352,7 @@ function loadSettings() {
       showMinute: saved.showMinute !== false,
       showSecond: saved.showSecond !== false,
       coordSystem: COORD_SYSTEMS.includes(saved.coordSystem) ? saved.coordSystem : "wgs84",
+      googleClientId: typeof saved.googleClientId === "string" ? saved.googleClientId.trim().slice(0, 200) : "",
       fields: normalizeFields(saved.fields || base.fields),
     };
   } catch {
@@ -440,6 +459,8 @@ function syncSettingsForm() {
   setSwitch(ui.secondToggle, settings.showSecond);
   ui.coordSystem.value = settings.coordSystem;
   setSwitch(ui.soundToggle, settings.shutterSound);
+  ui.googleClient.value = settings.googleClientId;
+  renderGoogleStatus();
   updateSample();
   renderFields();
   applyGrid();
@@ -1929,6 +1950,7 @@ function idbGet(id) {
 }
 
 function idbDelete(id) {
+  rememberDeleted(id);
   return openDb().then((database) => new Promise((resolve, reject) => {
     const tx = database.transaction("shots", "readwrite");
     tx.oncomplete = () => resolve();
@@ -1957,6 +1979,329 @@ async function saveRecord(when, source) {
     source,
     blob: state.blob,
   });
+  maybeSync();
+}
+
+function loadDeleted() {
+  try {
+    const list = JSON.parse(localStorage.getItem(DELETED_KEY) || "[]");
+    return Array.isArray(list) ? list.filter((id) => typeof id === "string" && id) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveDeleted(ids) {
+  localStorage.setItem(DELETED_KEY, JSON.stringify([...new Set(ids)].slice(-800)));
+}
+
+function rememberDeleted(id) {
+  if (!id) return;
+  const ids = loadDeleted();
+  if (!ids.includes(id)) ids.push(id);
+  saveDeleted(ids);
+}
+
+function recordMeta(record) {
+  return {
+    id: record.id,
+    takenAt: record.takenAt,
+    place: record.place || "",
+    lat: Number.isFinite(record.lat) ? record.lat : null,
+    lon: Number.isFinite(record.lon) ? record.lon : null,
+    weather: record.weather || "",
+    heading: Number.isFinite(record.heading) ? record.heading : null,
+    pitch: Number.isFinite(record.pitch) ? record.pitch : null,
+    altitude: Number.isFinite(record.altitude) ? record.altitude : null,
+    camera: record.camera || "",
+    direction: record.direction || "",
+    spotId: record.spotId || "",
+    filename: record.filename || "",
+    source: record.source || "",
+  };
+}
+
+function shotFileName(id) {
+  return `shot-${id}.jpg`;
+}
+
+function renderGoogleStatus(message) {
+  const email = googleAuth.email;
+  ui.googleStatus.textContent = message || (email
+    ? `已綁定 ${email}。拍攝紀錄會跟這個帳號同步。`
+    : "尚未綁定。貼上 OAuth 用戶端 ID 後按綁定。");
+  ui.googleGate.hidden = !email;
+  ui.googleGate.textContent = email ? `已綁定 ${email}` : "";
+  const origin = location.origin && location.origin !== "null" ? location.origin : location.href;
+  ui.googleOrigin.textContent = origin;
+}
+
+function setGoogleBusy(busy) {
+  for (const button of [ui.googleBind, ui.googleSync, ui.googleUnbind, ui.logSync]) {
+    button.disabled = busy;
+  }
+}
+
+function googleMessage(error) {
+  const code = String(error?.message || "");
+  if (code === "no-client") return "請先貼上 OAuth 用戶端 ID。";
+  if (code === "gis") return "Google 登入元件沒有載入，請確認網路。";
+  if (code === "expired") return "登入已過期，請再按一次同步。";
+  if (code === "access_denied" || code.startsWith("popup_")) return "沒有完成 Google 登入。";
+  if (code === "403" || code === "401") return "請確認這個網址已加入 OAuth 用戶端，並已啟用 Google Drive API。";
+  if (code === "interaction_required") return "請按綁定 Google 完成登入。";
+  if (code === "upload") return "照片沒有上傳完成，請再同步一次。";
+  return "同步沒有完成，請再試一次。";
+}
+
+let gisPromise = null;
+function loadGis() {
+  if (window.google?.accounts?.oauth2) return Promise.resolve();
+  if (gisPromise) return gisPromise;
+  gisPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "https://accounts.google.com/gsi/client";
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => {
+      gisPromise = null;
+      reject(new Error("gis"));
+    };
+    document.head.append(script);
+  });
+  return gisPromise;
+}
+
+function requestAccessToken(interactive) {
+  const clientId = settings.googleClientId.trim();
+  if (!clientId) return Promise.reject(new Error("no-client"));
+  return loadGis().then(() => new Promise((resolve, reject) => {
+    let settled = false;
+    const client = window.google.accounts.oauth2.initTokenClient({
+      client_id: clientId,
+      scope: "openid email https://www.googleapis.com/auth/drive.appdata",
+      callback: (tokenResponse) => {
+        if (settled) return;
+        settled = true;
+        if (tokenResponse.error) reject(new Error(tokenResponse.error));
+        else resolve(tokenResponse);
+      },
+      error_callback: (error) => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(error?.type || error?.message || "auth"));
+      },
+    });
+    client.requestAccessToken({ prompt: interactive ? "consent" : "" });
+  }));
+}
+
+async function driveFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  headers.set("Authorization", `Bearer ${googleAuth.token}`);
+  const response = await fetch(url, { ...options, headers });
+  if (response.status === 401) {
+    googleAuth.token = "";
+    googleAuth.expiresAt = 0;
+    throw new Error("expired");
+  }
+  if (!response.ok) throw new Error(String(response.status));
+  return response;
+}
+
+async function driveList() {
+  const files = [];
+  let pageToken = "";
+  do {
+    const url = new URL("https://www.googleapis.com/drive/v3/files");
+    url.searchParams.set("spaces", "appDataFolder");
+    url.searchParams.set("pageSize", "1000");
+    url.searchParams.set("fields", "nextPageToken,files(id,name)");
+    url.searchParams.set("q", "trashed = false");
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+    const data = await (await driveFetch(url)).json();
+    files.push(...(data.files || []));
+    pageToken = data.nextPageToken || "";
+  } while (pageToken);
+  return files;
+}
+
+async function driveUpload({ name, mime, body, fileId }) {
+  const blob = body instanceof Blob ? body : new Blob([body], { type: mime });
+  const meta = fileId ? { name, mimeType: mime } : { name, mimeType: mime, parents: ["appDataFolder"] };
+  const startUrl = fileId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?uploadType=resumable`
+    : "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable";
+  const start = await driveFetch(startUrl, {
+    method: fileId ? "PATCH" : "POST",
+    headers: {
+      "Content-Type": "application/json; charset=UTF-8",
+      "X-Upload-Content-Type": mime,
+      "X-Upload-Content-Length": String(blob.size),
+    },
+    body: JSON.stringify(meta),
+  });
+  const location = start.headers.get("Location");
+  if (!location) throw new Error("upload");
+  const uploaded = await driveFetch(location, {
+    method: "PUT",
+    headers: { "Content-Type": mime },
+    body: blob,
+  });
+  return uploaded.json();
+}
+
+function driveDownload(fileId) {
+  return driveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`)
+    .then((response) => response.blob());
+}
+
+function driveRemove(fileId) {
+  return driveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, { method: "DELETE" });
+}
+
+async function ensureGoogleToken(interactive) {
+  if (googleAuth.token && googleAuth.expiresAt > Date.now() + 60000) return;
+  const token = await requestAccessToken(interactive);
+  googleAuth.token = token.access_token;
+  googleAuth.expiresAt = Date.now() + (Number(token.expires_in) || 3500) * 1000;
+  const profile = await (await driveFetch("https://www.googleapis.com/oauth2/v3/userinfo")).json();
+  googleAuth.email = profile.email || googleAuth.email || "";
+  if (googleAuth.email) localStorage.setItem(GOOGLE_EMAIL_KEY, googleAuth.email);
+}
+
+async function pushPull() {
+  const files = await driveList();
+  const byName = new Map();
+  for (const file of files) {
+    if (file?.name && !byName.has(file.name)) byName.set(file.name, file);
+  }
+  const indexFile = byName.get(DRIVE_INDEX);
+  const remote = { records: [], deleted: [] };
+  if (indexFile) {
+    const parsed = await (await driveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(indexFile.id)}?alt=media`)).json();
+    if (Array.isArray(parsed.records)) remote.records = parsed.records;
+    if (Array.isArray(parsed.deleted)) remote.deleted = parsed.deleted.filter((id) => typeof id === "string" && id);
+  }
+  const deleted = new Set([...loadDeleted(), ...remote.deleted]);
+  const localById = new Map((await idbAll()).map((record) => [record.id, record]));
+  const remoteById = new Map(remote.records.filter((record) => record?.id).map((record) => [record.id, record]));
+
+  for (const id of deleted) {
+    if (localById.has(id)) {
+      await idbDelete(id);
+      localById.delete(id);
+    }
+    const remoteFile = byName.get(shotFileName(id));
+    if (remoteFile) {
+      await driveRemove(remoteFile.id);
+      byName.delete(shotFileName(id));
+    }
+  }
+
+  for (const [id, record] of localById) {
+    if (deleted.has(id) || !record.blob) continue;
+    const name = shotFileName(id);
+    if (!byName.has(name)) {
+      const uploaded = await driveUpload({ name, mime: "image/jpeg", body: record.blob });
+      byName.set(name, uploaded);
+    }
+  }
+
+  for (const [id, meta] of remoteById) {
+    if (deleted.has(id) || localById.has(id)) continue;
+    const remoteFile = byName.get(shotFileName(id));
+    if (!remoteFile) continue;
+    const blob = await driveDownload(remoteFile.id);
+    const record = recordMeta(meta);
+    record.blob = blob.type.startsWith("image/") ? blob : new Blob([blob], { type: "image/jpeg" });
+    await idbPut(record);
+    localById.set(id, record);
+  }
+
+  for (const record of localById.values()) {
+    if (record.blob || deleted.has(record.id)) continue;
+    const remoteFile = byName.get(shotFileName(record.id));
+    if (!remoteFile) continue;
+    const blob = await driveDownload(remoteFile.id);
+    record.blob = blob.type.startsWith("image/") ? blob : new Blob([blob], { type: "image/jpeg" });
+    await idbPut(record);
+  }
+
+  const records = [...localById.values()]
+    .filter((record) => record.id && !deleted.has(record.id))
+    .map(recordMeta)
+    .sort((a, b) => String(a.takenAt).localeCompare(String(b.takenAt)));
+  await driveUpload({
+    name: DRIVE_INDEX,
+    mime: "application/json",
+    body: JSON.stringify({
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      deleted: [...deleted].slice(-800),
+      records,
+    }),
+    fileId: indexFile?.id || "",
+  });
+  saveDeleted([...deleted]);
+}
+
+let syncAgain = false;
+
+async function syncGoogle({ interactive = false, announce = false } = {}) {
+  if (googleAuth.syncing) {
+    syncAgain = true;
+    return;
+  }
+  googleAuth.syncing = true;
+  setGoogleBusy(true);
+  renderGoogleStatus("同步中…");
+  let retry = false;
+  try {
+    await ensureGoogleToken(interactive);
+    await pushPull();
+    const count = (await idbAll()).length;
+    renderGoogleStatus(`已同步，這台裝置有 ${count} 筆紀錄。`);
+    if (announce) showToast("拍攝紀錄已同步");
+    if (!ui.log.hidden) await renderLog();
+  } catch (error) {
+    retry = !interactive && announce && /^(interaction_required|popup_)/.test(String(error?.message || ""));
+    if (!retry) {
+      const silent = !interactive && /^(interaction_required|popup_)/.test(String(error?.message || ""));
+      if (silent) renderGoogleStatus();
+      else {
+        const message = googleMessage(error);
+        renderGoogleStatus(message);
+        if (announce || interactive) showToast(message);
+      }
+    }
+  } finally {
+    googleAuth.syncing = false;
+    setGoogleBusy(false);
+  }
+  if (retry) return syncGoogle({ interactive: true, announce });
+  if (syncAgain) {
+    syncAgain = false;
+    maybeSync();
+  }
+}
+
+function maybeSync() {
+  if (!settings.googleClientId || !googleAuth.email) return;
+  if (!googleAuth.token || googleAuth.expiresAt <= Date.now() + 60000) return;
+  syncGoogle();
+}
+
+function unbindGoogle() {
+  const token = googleAuth.token;
+  googleAuth.token = "";
+  googleAuth.expiresAt = 0;
+  googleAuth.email = "";
+  localStorage.removeItem(GOOGLE_EMAIL_KEY);
+  if (token && window.google?.accounts?.oauth2?.revoke) {
+    window.google.accounts.oauth2.revoke(token, () => {});
+  }
+  renderGoogleStatus("已解除綁定。雲端紀錄還在，重新綁定後可以再同步下來。");
 }
 
 function sameLocalDay(iso, now = new Date()) {
@@ -2032,9 +2377,10 @@ async function renderLog() {
   ui.logBody.replaceChildren();
   ui.logEmpty.hidden = records.length > 0;
   ui.logEmpty.textContent = state.logTodayOnly ? "今天還沒有拍攝紀錄。" : "還沒有拍攝紀錄。";
+    const syncNote = googleAuth.email ? `已綁定 ${googleAuth.email}。` : "可在設定綁定 Google 後同步。";
     setLogNote(state.logTodayOnly
-    ? `今天 ${records.length} 張。地圖網址可複製，打開後看照片視角。`
-    : `全部 ${records.length} 張。`);
+    ? `今天 ${records.length} 張。${syncNote}`
+    : `全部 ${records.length} 張。${syncNote}`);
   for (const record of records) {
     const tr = document.createElement("tr");
     const values = rowValues(record);
@@ -2247,6 +2593,7 @@ ui.logBody.addEventListener("click", async (event) => {
   const id = button.dataset.delete;
   try {
     await idbDelete(id);
+    maybeSync();
     if (recordIdFromHash() === id) history.replaceState(null, "", `${location.pathname}${location.search}`);
     ui.logPreview.hidden = true;
     await renderLog();
@@ -2447,11 +2794,34 @@ ui.sphereSlots.addEventListener("click", (event) => {
   renderSphere();
 });
 ui.logMap.addEventListener("click", () => openMap({}));
+ui.googleClient.addEventListener("change", () => {
+  settings.googleClientId = ui.googleClient.value.trim();
+  saveSettings();
+});
+ui.googleBind.addEventListener("click", () => {
+  settings.googleClientId = ui.googleClient.value.trim();
+  saveSettings();
+  syncGoogle({ interactive: true, announce: true });
+});
+ui.googleSync.addEventListener("click", () => {
+  settings.googleClientId = ui.googleClient.value.trim();
+  saveSettings();
+  syncGoogle({ interactive: !googleAuth.token, announce: true });
+});
+ui.googleUnbind.addEventListener("click", unbindGoogle);
+ui.logSync.addEventListener("click", () => {
+  if (!settings.googleClientId.trim()) {
+    showToast("請先到設定貼上 OAuth 用戶端 ID");
+    return;
+  }
+  syncGoogle({ interactive: !googleAuth.token, announce: true });
+});
 ui.mapClose.addEventListener("click", closeMap);
 
 window.addEventListener("hashchange", handleHash);
 
 applyGrid();
 renderStatus();
+renderGoogleStatus();
 tickClock();
 handleHash();

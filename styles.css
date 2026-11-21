@@ -701,9 +701,36 @@ input[type="range"] { accent-color: var(--amber); }
   background: var(--amber);
 }
 
-.settings-log {
-  margin: 8px 0 4px;
+.settings-log { margin: 8px 0 4px; }
+
+.set-block input[type="text"] {
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #1c1a16;
+  color: var(--ink);
 }
+
+.stack-field {
+  display: block;
+  margin-top: 10px;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.button-row .plain {
+  padding: 8px 14px;
+  border-radius: 999px;
+}
+
+.button-row .plain:disabled { opacity: 0.45; }
 
 .log {
   z-index: 7;
