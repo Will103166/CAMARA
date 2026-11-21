@@ -2056,10 +2056,11 @@ function googleMessage(error) {
   if (code === "gis") return "Google 登入元件沒有載入，請確認網路。";
   if (code === "expired") return "登入已過期，請再按一次同步。";
   if (code === "access_denied" || code.startsWith("popup_")) return "沒有完成 Google 登入。";
-  if (code === "403" || code === "401") return "請確認這個網址已加入 OAuth 用戶端，並已啟用 Google Drive API。";
+  if (code === "403" || code === "401") return "請確認已啟用 Google Drive API，且登入的是同一個 Google 帳號。";
   if (code === "interaction_required") return "請按綁定 Google 完成登入。";
   if (code === "upload") return "照片沒有上傳完成，請再同步一次。";
-  return "同步沒有完成，請再試一次。";
+  if (code === "404") return "雲端資料讀取失敗，請再同步一次。";
+  return `同步沒有完成（${code || "未知錯誤"}），請再試一次。`;
 }
 
 let gisPromise = null;
@@ -2124,8 +2125,9 @@ async function driveList() {
     const url = new URL("https://www.googleapis.com/drive/v3/files");
     url.searchParams.set("spaces", "appDataFolder");
     url.searchParams.set("pageSize", "1000");
-    url.searchParams.set("fields", "nextPageToken,files(id,name)");
+    url.searchParams.set("fields", "nextPageToken,files(id,name,modifiedTime)");
     url.searchParams.set("q", "trashed = false");
+    url.searchParams.set("corpora", "user");
     if (pageToken) url.searchParams.set("pageToken", pageToken);
     const data = await (await driveFetch(url)).json();
     files.push(...(data.files || []));
@@ -2136,27 +2138,20 @@ async function driveList() {
 
 async function driveUpload({ name, mime, body, fileId }) {
   const blob = body instanceof Blob ? body : new Blob([body], { type: mime });
-  const meta = fileId ? { name, mimeType: mime } : { name, mimeType: mime, parents: ["appDataFolder"] };
-  const startUrl = fileId
-    ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?uploadType=resumable`
-    : "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable";
-  const start = await driveFetch(startUrl, {
+  const meta = fileId
+    ? { name, mimeType: mime }
+    : { name, mimeType: mime, parents: ["appDataFolder"] };
+  const form = new FormData();
+  form.append("metadata", new Blob([JSON.stringify(meta)], { type: "application/json" }));
+  form.append("file", blob, name);
+  const url = fileId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?uploadType=multipart&fields=id,name,modifiedTime`
+    : "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime";
+  const response = await driveFetch(url, {
     method: fileId ? "PATCH" : "POST",
-    headers: {
-      "Content-Type": "application/json; charset=UTF-8",
-      "X-Upload-Content-Type": mime,
-      "X-Upload-Content-Length": String(blob.size),
-    },
-    body: JSON.stringify(meta),
+    body: form,
   });
-  const location = start.headers.get("Location");
-  if (!location) throw new Error("upload");
-  const uploaded = await driveFetch(location, {
-    method: "PUT",
-    headers: { "Content-Type": mime },
-    body: blob,
-  });
-  return uploaded.json();
+  return response.json();
 }
 
 function driveDownload(fileId) {
@@ -2164,8 +2159,11 @@ function driveDownload(fileId) {
     .then((response) => response.blob());
 }
 
-function driveRemove(fileId) {
-  return driveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, { method: "DELETE" });
+async function driveRemove(fileId) {
+  const response = await driveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, {
+    method: "DELETE",
+  });
+  return response;
 }
 
 async function ensureGoogleToken(interactive) {
@@ -2178,27 +2176,62 @@ async function ensureGoogleToken(interactive) {
   if (googleAuth.email) localStorage.setItem(GOOGLE_EMAIL_KEY, googleAuth.email);
 }
 
+async function readRemoteIndex(files) {
+  const indexes = files
+    .filter((file) => file?.name === DRIVE_INDEX && file.id)
+    .sort((a, b) => String(b.modifiedTime || "").localeCompare(String(a.modifiedTime || "")));
+  const remote = { records: [], deleted: [], primary: indexes[0] || null, extras: indexes.slice(1) };
+  const byId = new Map();
+  const deleted = new Set();
+  for (const file of indexes) {
+    try {
+      const parsed = await (await driveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}?alt=media`)).json();
+      if (Array.isArray(parsed.deleted)) {
+        for (const id of parsed.deleted) {
+          if (typeof id === "string" && id) deleted.add(id);
+        }
+      }
+      if (Array.isArray(parsed.records)) {
+        for (const record of parsed.records) {
+          if (!record?.id || byId.has(record.id)) continue;
+          byId.set(record.id, record);
+        }
+      }
+    } catch {
+      // keep reading other index copies
+    }
+  }
+  remote.records = [...byId.values()];
+  remote.deleted = [...deleted];
+  return remote;
+}
+
+function asImageBlob(blob) {
+  return blob && typeof blob.type === "string" && blob.type.startsWith("image/")
+    ? blob
+    : new Blob([blob], { type: "image/jpeg" });
+}
+
 async function pushPull() {
   const files = await driveList();
   const byName = new Map();
   for (const file of files) {
-    if (file?.name && !byName.has(file.name)) byName.set(file.name, file);
+    if (!file?.name || file.name === DRIVE_INDEX) continue;
+    if (!byName.has(file.name)) byName.set(file.name, file);
   }
-  const indexFile = byName.get(DRIVE_INDEX);
-  const remote = { records: [], deleted: [] };
-  if (indexFile) {
-    const parsed = await (await driveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(indexFile.id)}?alt=media`)).json();
-    if (Array.isArray(parsed.records)) remote.records = parsed.records;
-    if (Array.isArray(parsed.deleted)) remote.deleted = parsed.deleted.filter((id) => typeof id === "string" && id);
-  }
+  const remote = await readRemoteIndex(files);
   const deleted = new Set([...loadDeleted(), ...remote.deleted]);
   const localById = new Map((await idbAll()).map((record) => [record.id, record]));
   const remoteById = new Map(remote.records.filter((record) => record?.id).map((record) => [record.id, record]));
+  let uploaded = 0;
+  let downloaded = 0;
+  let removed = 0;
 
   for (const id of deleted) {
     if (localById.has(id)) {
       await idbDelete(id);
       localById.delete(id);
+      removed += 1;
     }
     const remoteFile = byName.get(shotFileName(id));
     if (remoteFile) {
@@ -2211,8 +2244,9 @@ async function pushPull() {
     if (deleted.has(id) || !record.blob) continue;
     const name = shotFileName(id);
     if (!byName.has(name)) {
-      const uploaded = await driveUpload({ name, mime: "image/jpeg", body: record.blob });
-      byName.set(name, uploaded);
+      const file = await driveUpload({ name, mime: "image/jpeg", body: record.blob });
+      byName.set(name, file);
+      uploaded += 1;
     }
   }
 
@@ -2220,20 +2254,21 @@ async function pushPull() {
     if (deleted.has(id) || localById.has(id)) continue;
     const remoteFile = byName.get(shotFileName(id));
     if (!remoteFile) continue;
-    const blob = await driveDownload(remoteFile.id);
+    const blob = asImageBlob(await driveDownload(remoteFile.id));
     const record = recordMeta(meta);
-    record.blob = blob.type.startsWith("image/") ? blob : new Blob([blob], { type: "image/jpeg" });
+    record.blob = blob;
     await idbPut(record);
     localById.set(id, record);
+    downloaded += 1;
   }
 
   for (const record of localById.values()) {
     if (record.blob || deleted.has(record.id)) continue;
     const remoteFile = byName.get(shotFileName(record.id));
     if (!remoteFile) continue;
-    const blob = await driveDownload(remoteFile.id);
-    record.blob = blob.type.startsWith("image/") ? blob : new Blob([blob], { type: "image/jpeg" });
+    record.blob = asImageBlob(await driveDownload(remoteFile.id));
     await idbPut(record);
+    downloaded += 1;
   }
 
   const records = [...localById.values()]
@@ -2249,9 +2284,13 @@ async function pushPull() {
       deleted: [...deleted].slice(-800),
       records,
     }),
-    fileId: indexFile?.id || "",
+    fileId: remote.primary?.id || "",
   });
+  for (const extra of remote.extras) {
+    try { await driveRemove(extra.id); } catch { /* ignore */ }
+  }
   saveDeleted([...deleted]);
+  return { uploaded, downloaded, removed, total: records.length };
 }
 
 let syncAgain = false;
@@ -2267,11 +2306,23 @@ async function syncGoogle({ interactive = false, announce = false } = {}) {
   let retry = false;
   try {
     await ensureGoogleToken(interactive);
-    await pushPull();
-    const count = (await idbAll()).length;
-    renderGoogleStatus(`已同步，這台裝置有 ${count} 筆紀錄。`);
-    if (announce) showToast("拍攝紀錄已同步");
-    if (!ui.log.hidden) await renderLog();
+    const result = await pushPull();
+    const when = formatClock(new Date()) || formatWhen(new Date());
+    renderGoogleStatus(`已同步（${when}）：上傳 ${result.uploaded}、下載 ${result.downloaded}，這台共 ${result.total} 筆。`);
+    if (announce) {
+      showToast(result.downloaded || result.uploaded
+        ? `同步完成：上傳 ${result.uploaded}、下載 ${result.downloaded}`
+        : `雲端已是最新，這台共 ${result.total} 筆`);
+    }
+    if (!ui.log.hidden) {
+      await renderLog();
+      if (result.downloaded && state.logTodayOnly) {
+        const visible = visibleRecords(await idbAll()).length;
+        if (visible < result.total) {
+          setLogNote(`已從雲端下載 ${result.downloaded} 筆。若列表較少，關掉「只看今天」可看到全部 ${result.total} 筆。`);
+        }
+      }
+    }
   } catch (error) {
     retry = !interactive && announce && /^(interaction_required|popup_)/.test(String(error?.message || ""));
     if (!retry) {
