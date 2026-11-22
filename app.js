@@ -2056,10 +2056,13 @@ function googleMessage(error) {
   if (code === "gis") return "Google 登入元件沒有載入，請確認網路。";
   if (code === "expired") return "登入已過期，請再按一次同步。";
   if (code === "access_denied" || code.startsWith("popup_")) return "沒有完成 Google 登入。";
-  if (code === "403" || code === "401") return "請確認已啟用 Google Drive API，且登入的是同一個 Google 帳號。";
+  if (code === "403" || code === "401" || /insufficient|authError|ACCESS_TOKEN/i.test(code)) {
+    return "請確認已啟用 Google Drive API，兩台都登入同一個 Google 帳號，並重新按綁定 Google。";
+  }
   if (code === "interaction_required") return "請按綁定 Google 完成登入。";
-  if (code === "upload") return "照片沒有上傳完成，請再同步一次。";
-  if (code === "404") return "雲端資料讀取失敗，請再同步一次。";
+  if (code === "upload" || code === "no-blob") return "照片沒有上傳完成，請再同步一次。";
+  if (code === "404" || /notFound/i.test(code)) return "雲端資料讀取失敗，請再同步一次。";
+  if (/dailyLimit|rateLimit|userRateLimit/i.test(code)) return "同步次數暫時太多，請稍後再試。";
   return `同步沒有完成（${code || "未知錯誤"}），請再試一次。`;
 }
 
@@ -2114,7 +2117,19 @@ async function driveFetch(url, options = {}) {
     googleAuth.expiresAt = 0;
     throw new Error("expired");
   }
-  if (!response.ok) throw new Error(String(response.status));
+  if (!response.ok) {
+    let detail = String(response.status);
+    try {
+      const payload = await response.json();
+      detail = payload?.error?.errors?.[0]?.reason
+        || payload?.error?.status
+        || payload?.error?.message
+        || detail;
+    } catch {
+      // keep status code
+    }
+    throw new Error(detail);
+  }
   return response;
 }
 
@@ -2125,7 +2140,7 @@ async function driveList() {
     const url = new URL("https://www.googleapis.com/drive/v3/files");
     url.searchParams.set("spaces", "appDataFolder");
     url.searchParams.set("pageSize", "1000");
-    url.searchParams.set("fields", "nextPageToken,files(id,name,modifiedTime)");
+    url.searchParams.set("fields", "nextPageToken,files(id,name,modifiedTime,size)");
     url.searchParams.set("q", "trashed = false");
     url.searchParams.set("corpora", "user");
     if (pageToken) url.searchParams.set("pageToken", pageToken);
@@ -2136,22 +2151,37 @@ async function driveList() {
   return files;
 }
 
+async function materializeBlob(body, mime) {
+  if (body instanceof Blob) {
+    const buffer = await body.arrayBuffer();
+    return new Blob([buffer], { type: mime || body.type || "application/octet-stream" });
+  }
+  return new Blob([body], { type: mime || "application/octet-stream" });
+}
+
 async function driveUpload({ name, mime, body, fileId }) {
-  const blob = body instanceof Blob ? body : new Blob([body], { type: mime });
-  const meta = fileId
-    ? { name, mimeType: mime }
-    : { name, mimeType: mime, parents: ["appDataFolder"] };
-  const form = new FormData();
-  form.append("metadata", new Blob([JSON.stringify(meta)], { type: "application/json" }));
-  form.append("file", blob, name);
-  const url = fileId
-    ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?uploadType=multipart&fields=id,name,modifiedTime`
-    : "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime";
-  const response = await driveFetch(url, {
-    method: fileId ? "PATCH" : "POST",
-    body: form,
-  });
-  return response.json();
+  const blob = await materializeBlob(body, mime);
+  let id = fileId;
+  if (!id) {
+    const created = await (await driveFetch("https://www.googleapis.com/drive/v3/files?fields=id,name,modifiedTime", {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=UTF-8" },
+      body: JSON.stringify({
+        name,
+        mimeType: mime,
+        parents: ["appDataFolder"],
+      }),
+    })).json();
+    id = created.id;
+  }
+  return (await driveFetch(
+    `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(id)}?uploadType=media&fields=id,name,modifiedTime`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": mime || "application/octet-stream" },
+      body: blob,
+    }
+  )).json();
 }
 
 function driveDownload(fileId) {
@@ -2226,6 +2256,7 @@ async function pushPull() {
   let uploaded = 0;
   let downloaded = 0;
   let removed = 0;
+  let missingBlob = 0;
 
   for (const id of deleted) {
     if (localById.has(id)) {
@@ -2241,10 +2272,21 @@ async function pushPull() {
   }
 
   for (const [id, record] of localById) {
-    if (deleted.has(id) || !record.blob) continue;
+    if (deleted.has(id)) continue;
     const name = shotFileName(id);
-    if (!byName.has(name)) {
-      const file = await driveUpload({ name, mime: "image/jpeg", body: record.blob });
+    const remoteFile = byName.get(name);
+    const remoteEmpty = remoteFile && Number(remoteFile.size) === 0;
+    if (!record.blob) {
+      missingBlob += 1;
+      continue;
+    }
+    if (!remoteFile || remoteEmpty) {
+      const file = await driveUpload({
+        name,
+        mime: "image/jpeg",
+        body: record.blob,
+        fileId: remoteFile?.id || "",
+      });
       byName.set(name, file);
       uploaded += 1;
     }
@@ -2290,7 +2332,7 @@ async function pushPull() {
     try { await driveRemove(extra.id); } catch { /* ignore */ }
   }
   saveDeleted([...deleted]);
-  return { uploaded, downloaded, removed, total: records.length };
+  return { uploaded, downloaded, removed, missingBlob, total: records.length, cloud: records.length };
 }
 
 let syncAgain = false;
@@ -2306,13 +2348,20 @@ async function syncGoogle({ interactive = false, announce = false } = {}) {
   let retry = false;
   try {
     await ensureGoogleToken(interactive);
+    if (!googleAuth.email) throw new Error("interaction_required");
     const result = await pushPull();
     const when = formatClock(new Date()) || formatWhen(new Date());
-    renderGoogleStatus(`已同步（${when}）：上傳 ${result.uploaded}、下載 ${result.downloaded}，這台共 ${result.total} 筆。`);
+    let status = `已同步（${when}）：上傳 ${result.uploaded}、下載 ${result.downloaded}，雲端 ${result.cloud} 筆，這台 ${result.total} 筆。`;
+    if (result.missingBlob) status += ` 有 ${result.missingBlob} 筆本機缺照片檔，無法上傳。`;
+    renderGoogleStatus(status);
     if (announce) {
-      showToast(result.downloaded || result.uploaded
-        ? `同步完成：上傳 ${result.uploaded}、下載 ${result.downloaded}`
-        : `雲端已是最新，這台共 ${result.total} 筆`);
+      if (result.uploaded || result.downloaded) {
+        showToast(`同步完成：上傳 ${result.uploaded}、下載 ${result.downloaded}`);
+      } else if (result.missingBlob) {
+        showToast(`登入成功，但有 ${result.missingBlob} 筆缺照片檔，無法上傳`);
+      } else {
+        showToast(`雲端已是最新，共 ${result.cloud} 筆。請確認兩台是同一個 Google 帳號`);
+      }
     }
     if (!ui.log.hidden) {
       await renderLog();
