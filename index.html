@@ -28,7 +28,7 @@
         <button id="install" class="ghost" type="button" hidden>安裝到主畫面</button>
       </div>
       <p id="gate-note" class="fine">相機與定位會先詢問權限。地點與天氣需要連線，時間以這台裝置為準。</p>
-      <p class="version">版本 1.1.5</p>
+      <p class="version">版本 1.2.0</p>
       <p id="google-gate" class="version" hidden></p>
     </section>
 
@@ -56,10 +56,17 @@
           </button>
         </div>
       </div>
+      <canvas id="sphere-canvas" class="sphere-canvas" hidden></canvas>
       <div id="sphere" class="sphere" hidden>
-        <p id="sphere-hint">前、右、後、左、上、下各拍至少一張。</p>
-        <div id="sphere-slots" class="sphere-slots"></div>
+        <p id="sphere-hint">原地不動，照畫面上的圓點轉動手機。</p>
+        <div class="sphere-bar">
+          <span id="sphere-count">0/23</span>
+          <div class="sphere-progress"><i id="sphere-progress"></i></div>
+          <button id="sphere-finish" class="sphere-finish" type="button" disabled>組合全景</button>
+        </div>
       </div>
+      <button id="sphere-ring" class="sphere-ring" type="button" aria-label="拍這個角度" hidden></button>
+      <div id="flash" class="flash" aria-hidden="true"></div>
       <div class="hud" aria-hidden="true">
         <p id="hud-clock" class="clock">--:--:--</p>
         <p id="hud-meta" class="sub">預覽，按下快門後才寫入照片</p>
@@ -115,6 +122,11 @@
           </div>
           <p class="hint">用戶端 ID 已內建。請確認 Google Cloud 的已授權 JavaScript 來源包含 <b id="google-origin"></b>，並已啟用 Google Drive API。手機、電腦必須登入同一個 Google 帳號：有照片的那台先同步，另一台再同步。同步只寫入這個 App 的隱藏資料夾。</p>
         </div>
+        <label class="set-block">
+          <span>鏡頭視角（環景） <b id="camera-fov-label">66°</b></span>
+          <input id="camera-fov" type="range" min="45" max="95" step="1" value="66">
+          <p class="hint">指照片長邊的視角，一般手機約 66°。畫面上的圓點位置與組合全景都用這個值；接縫對不上時，可在全景頁用「接縫微調」。</p>
+        </label>
         <label class="set-block">
           <span>字型</span>
           <select id="font">
@@ -241,10 +253,32 @@
         <button id="map-close" class="done" type="button">完成</button>
       </div>
       <p id="map-note" class="hint">扇形是照片朝向。朝上、朝下畫成圓。</p>
+      <button id="map-pano" class="plain map-pano" type="button" hidden>看這個點的環景</button>
       <div id="leaflet" class="leaflet-host"></div>
       <div id="map-photos" class="map-photos"></div>
     </section>
+
+    <section id="pano-screen" class="pano-screen" hidden>
+      <canvas id="pano-canvas" class="pano-canvas"></canvas>
+      <div class="pano-top">
+        <button id="pano-close" class="done" type="button">完成</button>
+        <p id="pano-info" class="pill">組合中…</p>
+      </div>
+      <div id="pano-map" class="pano-map" hidden></div>
+      <p id="pano-status" class="pano-status" hidden></p>
+      <div class="pano-tools">
+        <button id="pano-gyro" class="chip" type="button" aria-pressed="false">手機轉動看</button>
+        <button id="pano-map-open" class="chip" type="button">地圖</button>
+        <button id="pano-save" class="chip" type="button">下載全景圖</button>
+        <button id="pano-rebuild" class="chip" type="button">重新組合</button>
+        <label class="pano-seam">
+          <span>接縫微調</span>
+          <input id="pano-fovscale" type="range" min="0.85" max="1.15" step="0.01" value="1" aria-label="接縫微調">
+        </label>
+      </div>
+    </section>
   </main>
   <script src="./app.js"></script>
+  <script src="./pano.js"></script>
 </body>
 </html>

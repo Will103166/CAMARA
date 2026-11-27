@@ -1,9 +1,10 @@
-const CACHE = "time-cam-v10";
+const CACHE = "time-cam-v11";
 const ASSETS = [
   "./",
   "./index.html",
   "./styles.css",
   "./app.js",
+  "./pano.js",
   "./manifest.webmanifest",
   "./icons/icon-192.png",
   "./icons/icon-512.png",

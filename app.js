@@ -11,8 +11,32 @@ const FIELD_LABEL = { time: "時間", place: "地點", coords: "坐標", weather
 const COORD_SYSTEMS = ["wgs84", "twd97-121", "twd97-119"];
 const WEEK_MODES = ["off", "week", "zhou"];
 const LOG_HEADERS = ["時間", "地點", "坐標", "天氣", "方位角", "相機", "照片名稱", "地圖", "超連結"];
-const SPHERE_ORDER = ["front", "right", "back", "left", "up", "down"];
-const SPHERE_LABEL = { front: "前", right: "右", back: "後", left: "左", up: "上", down: "下" };
+const SPHERE_LABEL = { front: "前", right: "右", back: "後", left: "左", up: "天頂", down: "地面", x: "補拍" };
+const DEG = Math.PI / 180;
+const SPHERE_ROWS = [
+  { pitch: 0, count: 9, name: "水平" },
+  { pitch: 45, count: 6, name: "抬頭45°" },
+  { pitch: -45, count: 6, name: "低頭45°" },
+];
+
+function buildSphereTargets() {
+  const list = [];
+  const ring = (index) => {
+    const row = SPHERE_ROWS[index];
+    for (let i = 0; i < row.count; i += 1) {
+      const az = Math.round((360 / row.count) * i);
+      list.push({ id: `r${index}-${i}`, az, pitch: row.pitch, label: `${row.name} 轉${az}°` });
+    }
+  };
+  ring(0);
+  ring(1);
+  list.push({ id: "up", az: 0, pitch: 90, label: "天頂（朝天空）" });
+  ring(2);
+  list.push({ id: "down", az: 0, pitch: -90, label: "地面（朝腳下）" });
+  return list;
+}
+
+const SPHERE_TARGETS = buildSphereTargets();
 const ANCHORS = ["tl", "tc", "tr", "ml", "mc", "mr", "bl", "bc", "br"];
 const STORAGE_KEY = "timecam-settings-v1";
 const DEFAULT_GOOGLE_CLIENT_ID = "96826332482-p3r4ico20m3ki9bttp7ff0rt2qk0317f.apps.googleusercontent.com";
@@ -125,7 +149,15 @@ const ui = {
   sphereToggle: $("sphere-toggle"),
   sphere: $("sphere"),
   sphereHint: $("sphere-hint"),
-  sphereSlots: $("sphere-slots"),
+  sphereCount: $("sphere-count"),
+  sphereProgress: $("sphere-progress"),
+  sphereFinish: $("sphere-finish"),
+  sphereCanvas: $("sphere-canvas"),
+  sphereRing: $("sphere-ring"),
+  flash: $("flash"),
+  cameraFov: $("camera-fov"),
+  cameraFovLabel: $("camera-fov-label"),
+  mapPano: $("map-pano"),
   mapScreen: $("map-screen"),
   mapClose: $("map-close"),
   mapNote: $("map-note"),
@@ -183,8 +215,13 @@ const state = {
   capturedPitch: null,
   capturedCamera: null,
   capturedDirection: "",
+  capturedExtra: null,
+  rot: null,
+  yawFix: 0,
+  yawKnown: false,
+  sawAbsolute: false,
   sphere: null,
-  sphereSignature: "",
+  sphereText: "",
   leafletMap: null,
   mapUrls: [],
 };
@@ -333,6 +370,7 @@ function loadSettings() {
     showSecond: true,
     coordSystem: "wgs84",
     googleClientId: DEFAULT_GOOGLE_CLIENT_ID,
+    cameraFov: 66,
     fields: DEFAULT_FIELDS.map((field) => ({ ...field })),
   };
   try {
@@ -355,6 +393,7 @@ function loadSettings() {
       showSecond: saved.showSecond !== false,
       coordSystem: COORD_SYSTEMS.includes(saved.coordSystem) ? saved.coordSystem : "wgs84",
       googleClientId: googleClientId || DEFAULT_GOOGLE_CLIENT_ID,
+      cameraFov: Number.isFinite(Number(saved.cameraFov)) ? Math.min(95, Math.max(45, Number(saved.cameraFov))) : 66,
       fields: normalizeFields(saved.fields || base.fields),
     };
   } catch {
@@ -462,6 +501,8 @@ function syncSettingsForm() {
   ui.coordSystem.value = settings.coordSystem;
   setSwitch(ui.soundToggle, settings.shutterSound);
   ui.googleClient.value = settings.googleClientId;
+  ui.cameraFov.value = String(settings.cameraFov);
+  ui.cameraFovLabel.textContent = `${Math.round(settings.cameraFov)}°`;
   renderGoogleStatus();
   updateSample();
   renderFields();
@@ -917,6 +958,52 @@ function paintOrientation() {
   if (state.sphere && !ui.camera.hidden) renderSphere();
 }
 
+function dot3(a, b) {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+function cross3(a, b) {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+
+function neg3(a) {
+  return [-a[0], -a[1], -a[2]];
+}
+
+function dirVector(azDeg, pitchDeg) {
+  const az = azDeg * DEG;
+  const pitch = pitchDeg * DEG;
+  return [Math.sin(az) * Math.cos(pitch), Math.cos(az) * Math.cos(pitch), Math.sin(pitch)];
+}
+
+function wrap180(angle) {
+  return ((((angle + 180) % 360) + 360) % 360) - 180;
+}
+
+function angleBetween(a, b) {
+  return Math.acos(Math.max(-1, Math.min(1, dot3(a, b)))) / DEG;
+}
+
+function cameraBasisFromEvent(event) {
+  const { alpha, beta, gamma } = event;
+  if (!Number.isFinite(alpha) || !Number.isFinite(beta) || !Number.isFinite(gamma)) return null;
+  const ca = Math.cos(alpha * DEG);
+  const sa = Math.sin(alpha * DEG);
+  const cb = Math.cos(beta * DEG);
+  const sb = Math.sin(beta * DEG);
+  const cg = Math.cos(gamma * DEG);
+  const sg = Math.sin(gamma * DEG);
+  const devX = [ca * cg - sa * sb * sg, cg * sa + ca * sb * sg, -cb * sg];
+  const devY = [-cb * sa, ca * cb, sb];
+  const devZ = [ca * sg + cg * sa * sb, sa * sg - ca * cg * sb, cb * cg];
+  const angle = (((Number(screen.orientation?.angle ?? window.orientation ?? 0) || 0) % 360) + 360) % 360;
+  let up = devY;
+  if (angle === 90) up = devX;
+  else if (angle === 180) up = neg3(devY);
+  else if (angle === 270) up = neg3(devX);
+  return { f: neg3(devZ), u: up };
+}
+
 function onOrientation(event) {
   const roll = rollFromEvent(event);
   if (Number.isFinite(roll)) {
@@ -927,6 +1014,18 @@ function onOrientation(event) {
   if (Number.isFinite(heading)) state.heading = heading;
   const pitch = pitchFromEvent(event);
   if (Number.isFinite(pitch)) state.pitch = pitch;
+  const absoluteEvent = event.absolute === true || event.type === "deviceorientationabsolute";
+  if (absoluteEvent) state.sawAbsolute = true;
+  if (absoluteEvent || !state.sawAbsolute) {
+    const basis = cameraBasisFromEvent(event);
+    if (basis) {
+      state.rot = basis;
+      if (Number.isFinite(heading) && Math.abs(basis.f[2]) < 0.85) {
+        state.yawFix = wrap180(heading - Math.atan2(basis.f[0], basis.f[1]) / DEG);
+        state.yawKnown = true;
+      }
+    }
+  }
   if ((Number.isFinite(roll) || state.sphere) && !state.orientFrame) {
     state.orientFrame = requestAnimationFrame(paintOrientation);
   }
@@ -1236,105 +1335,344 @@ function formatCamera(info, direction) {
   const size = info?.width && info?.height ? `${info.width}×${info.height}` : "";
   const zoom = Number.isFinite(info?.zoom) ? `${Number(info.zoom).toFixed(1)}×` : "";
   const label = info?.label && info.label.length <= 32 ? info.label : "";
-  return [direction ? SPHERE_LABEL[direction] || direction : "", facing, size, zoom, label].filter(Boolean).join(" · ");
+  return [direction ? targetLabel(direction) || direction : "", facing, size, zoom, label].filter(Boolean).join(" · ");
 }
 
-function angleDiff(a, b) {
-  return Math.abs((((a - b) % 360) + 540) % 360 - 180);
+function targetById(id) {
+  return SPHERE_TARGETS.find((target) => target.id === id) || null;
 }
 
-function suggestedSlot() {
-  if (!state.sphere) return "";
-  const pitch = state.pitch;
-  if (Number.isFinite(pitch) && pitch >= 50) return "up";
-  if (Number.isFinite(pitch) && pitch <= -50) return "down";
-  if (Number.isFinite(pitch) && Math.abs(pitch) > 40) return "";
-  if (!Number.isFinite(state.heading) || !Number.isFinite(state.sphere.origin)) return "";
-  const delta = (state.heading - state.sphere.origin + 360) % 360;
-  const names = ["front", "right", "back", "left"];
-  const index = Math.round(delta / 90) % 4;
-  if (angleDiff(delta, index * 90) > 35) return "";
-  return names[index];
+function targetLabel(id) {
+  return targetById(id)?.label || SPHERE_LABEL[id] || "";
 }
 
-function sphereMissing() {
-  if (!state.sphere) return "";
-  const missing = SPHERE_ORDER.filter((id) => state.sphere.counts[id] < 1).map((id) => SPHERE_LABEL[id]);
-  return missing.length ? `還缺 ${missing.join("、")}` : "六個方向都拍了";
+function targetDir(target) {
+  return dirVector((state.sphere?.origin ?? 0) + target.az, target.pitch);
+}
+
+function sphereDoneCount() {
+  if (!state.sphere) return 0;
+  return SPHERE_TARGETS.filter((target) => state.sphere.counts[target.id] > 0).length;
+}
+
+function sphereNext() {
+  const session = state.sphere;
+  if (!session) return null;
+  const undone = SPHERE_TARGETS.filter((target) => !(session.counts[target.id] > 0));
+  if (!undone.length) return null;
+  if (!state.rot || session.origin == null) return undone[0];
+  let best = undone[0];
+  let bestAngle = 999;
+  for (const target of undone) {
+    const angle = angleBetween(state.rot.f, targetDir(target));
+    if (angle < bestAngle) {
+      bestAngle = angle;
+      best = target;
+    }
+  }
+  return best;
+}
+
+function sphereAssign() {
+  const session = state.sphere;
+  if (!session) return "";
+  if (!state.rot || session.origin == null) return sphereNext()?.id || "x";
+  let best = null;
+  let bestScore = 999;
+  for (const target of SPHERE_TARGETS) {
+    const angle = angleBetween(state.rot.f, targetDir(target));
+    const score = angle + (session.counts[target.id] > 0 ? 4 : 0);
+    if (score < bestScore) {
+      bestScore = score;
+      best = target;
+    }
+  }
+  return best && bestScore < 24 ? best.id : "x";
+}
+
+function sphereFocalPx(rect) {
+  const vw = ui.preview.videoWidth;
+  const vh = ui.preview.videoHeight;
+  const zoom = Math.max(1, state.zoom);
+  if (!vw || !vh) return (rect.height / (2 * Math.tan(30 * DEG))) * zoom;
+  const base = Math.max(vw, vh) / 2 / Math.tan((settings.cameraFov * DEG) / 2);
+  return base * Math.max(rect.width / vw, rect.height / vh) * zoom;
+}
+
+function sizeSphereCanvas(rect) {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const width = Math.max(1, Math.round(rect.width * dpr));
+  const height = Math.max(1, Math.round(rect.height * dpr));
+  if (ui.sphereCanvas.width !== width || ui.sphereCanvas.height !== height) {
+    ui.sphereCanvas.width = width;
+    ui.sphereCanvas.height = height;
+  }
+  return dpr;
+}
+
+function drawSphereGuide() {
+  const session = state.sphere;
+  const rect = ui.camera.getBoundingClientRect();
+  const dpr = sizeSphereCanvas(rect);
+  const ctx = ui.sphereCanvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, rect.width, rect.height);
+  if (!session || !state.rot || session.origin == null) return 999;
+  const { f, u } = state.rot;
+  const r = cross3(f, u);
+  const focal = sphereFocalPx(rect);
+  const cx = rect.width / 2;
+  const cy = rect.height / 2;
+  const next = sphereNext();
+  const pulse = (Math.sin(performance.now() / 260) + 1) / 2;
+  let nearestUndone = 999;
+  let nextVisible = false;
+  for (const target of SPHERE_TARGETS) {
+    const v = targetDir(target);
+    const cz = dot3(v, f);
+    const done = session.counts[target.id] > 0;
+    if (!done) nearestUndone = Math.min(nearestUndone, angleBetween(f, v));
+    const isNext = next && next.id === target.id;
+    if (cz <= 0.05) continue;
+    const sx = cx + (focal * dot3(v, r)) / cz;
+    const sy = cy - (focal * dot3(v, u)) / cz;
+    if (sx < -20 || sy < -20 || sx > rect.width + 20 || sy > rect.height + 20) continue;
+    if (isNext) nextVisible = true;
+    ctx.beginPath();
+    if (done) {
+      ctx.arc(sx, sy, 10, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(111, 207, 151, 0.85)";
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+      ctx.stroke();
+    } else if (isNext) {
+      ctx.arc(sx, sy, 15 + pulse * 4, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(231, 163, 34, 0.38)";
+      ctx.fill();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "#fff";
+      ctx.stroke();
+    } else {
+      ctx.arc(sx, sy, 10, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(231, 163, 34, 0.2)";
+      ctx.fill();
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = "#e7a322";
+      ctx.stroke();
+    }
+    if (isNext) {
+      ctx.beginPath();
+      ctx.setLineDash([6, 6]);
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(sx, sy);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.55)";
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+  if (next && !nextVisible) {
+    const v = targetDir(next);
+    let dx = dot3(v, r);
+    const dy = -dot3(v, u);
+    if (Math.hypot(dx, dy) < 0.001) dx = 1;
+    const angle = Math.atan2(dy, dx);
+    const radius = Math.min(rect.width, rect.height) * 0.36;
+    ctx.save();
+    ctx.translate(cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(18, 0);
+    ctx.lineTo(-10, -13);
+    ctx.lineTo(-10, 13);
+    ctx.closePath();
+    ctx.fillStyle = "#e7a322";
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#fff";
+    ctx.stroke();
+    ctx.restore();
+  }
+  return nearestUndone;
 }
 
 function sphereHint() {
-  if (!state.sphere) return "";
-  const missing = sphereMissing();
-  if (missing === "六個方向都拍了") return "六個方向都有照片了，可以再補拍，或再按一次環景結束這個點位。";
-  const aim = suggestedSlot();
-  if (!Number.isFinite(state.heading) && aim !== "up" && aim !== "down") {
-    return `沒有羅盤時先點方向。${missing}`;
+  const session = state.sphere;
+  if (!session) return "";
+  const total = SPHERE_TARGETS.length;
+  const done = sphereDoneCount();
+  const next = sphereNext();
+  if (!next) return `${total} 個角度都拍完了，按「組合全景」。也可以再補拍。`;
+  if (!state.rot || session.origin == null) {
+    return `沒有方向感應器，依序拍：${next.label}（第 ${done + 1}/${total}），拍完點中間圓圈。`;
   }
-  if (aim && state.sphere.counts[aim] < 1) return `已對準${SPHERE_LABEL[aim]}，按快門。${missing}`;
-  if (aim) return `現在朝${SPHERE_LABEL[aim]}。${missing}`;
-  const next = SPHERE_ORDER.find((id) => state.sphere.counts[id] < 1);
-  return `請轉向${SPHERE_LABEL[next]}。${missing}`;
+  const f = state.rot.f;
+  const curAz = Math.atan2(f[0], f[1]) / DEG;
+  const curPitch = Math.asin(Math.max(-1, Math.min(1, f[2]))) / DEG;
+  const angle = angleBetween(f, targetDir(next));
+  if (angle < 7) return `對準了：${next.label}。點中間圓圈拍照。（${done}/${total}）`;
+  const dAz = wrap180(session.origin + next.az - curAz);
+  const dPitch = next.pitch - curPitch;
+  const poleTarget = Math.abs(next.pitch) >= 80 || Math.abs(curPitch) > 70;
+  if (poleTarget || Math.abs(dPitch) > Math.abs(dAz) * Math.cos(curPitch * DEG)) {
+    return `${dPitch > 0 ? "把手機抬高" : "把手機壓低"} ${Math.round(Math.abs(dPitch))}°，找「${next.label}」的圓點。（${done}/${total}）`;
+  }
+  return `${dAz > 0 ? "向右轉" : "向左轉"} ${Math.round(Math.abs(dAz))}°，找「${next.label}」的圓點。（${done}/${total}）`;
 }
 
 function renderSphere() {
-  const on = Boolean(state.sphere);
+  const session = state.sphere;
+  const on = Boolean(session);
+  const visible = on && !ui.camera.hidden;
   ui.sphere.hidden = !on;
+  ui.sphereCanvas.hidden = !visible;
+  ui.sphereRing.hidden = !visible;
   ui.sphereToggle.classList.toggle("is-on", on);
   ui.sphereToggle.setAttribute("aria-pressed", String(on));
-  if (!on) {
-    state.sphereSignature = "";
+  if (!visible) {
+    state.sphereText = "";
     return;
   }
-  const aim = suggestedSlot();
-  const hint = sphereHint();
-  const signature = `${aim}|${state.sphere.manual}|${SPHERE_ORDER.map((id) => state.sphere.counts[id]).join(",")}|${hint}`;
-  if (signature === state.sphereSignature) return;
-  state.sphereSignature = signature;
-  ui.sphereHint.textContent = hint;
-  ui.sphereSlots.replaceChildren();
-  for (const id of SPHERE_ORDER) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.dataset.slot = id;
-    const count = state.sphere.counts[id] || 0;
-    button.textContent = count ? `${SPHERE_LABEL[id]} ${count}` : SPHERE_LABEL[id];
-    button.classList.toggle("is-done", count > 0);
-    button.classList.toggle("is-aim", aim === id);
-    button.classList.toggle("is-on", !aim && state.sphere.manual === id);
-    ui.sphereSlots.append(button);
+  if (session.origin == null && state.rot && Math.abs(state.rot.f[2]) < 0.7) {
+    session.origin = Math.atan2(state.rot.f[0], state.rot.f[1]) / DEG;
   }
+  const nearest = drawSphereGuide();
+  ui.sphereRing.classList.toggle("is-aim", nearest < 7);
+  const text = sphereHint();
+  if (text !== state.sphereText) {
+    state.sphereText = text;
+    ui.sphereHint.textContent = text;
+  }
+  const done = sphereDoneCount();
+  const total = SPHERE_TARGETS.length;
+  const countText = `${done}/${total}`;
+  if (ui.sphereCount.textContent !== countText) {
+    ui.sphereCount.textContent = countText;
+    ui.sphereProgress.style.width = `${Math.round((done / total) * 100)}%`;
+  }
+  ui.sphereFinish.disabled = session.shots < 2;
 }
 
 function toggleSphere() {
   if (state.sphere) {
-    const done = SPHERE_ORDER.every((id) => state.sphere.counts[id] >= 1);
     state.sphere = null;
     renderSphere();
-    showToast(done ? "這個點位六個方向都拍了，可在地圖看視角" : "已結束這個環景點位");
+    showToast("已結束環景拍攝。照片留在紀錄，到紀錄頁按「環景」可再組合");
     return;
   }
+  if (state.facing === "user") {
+    showToast("環景請用後鏡頭，先按翻轉");
+    return;
+  }
+  const f = state.rot?.f;
   state.sphere = {
     id: crypto.randomUUID?.() || `spot-${Date.now()}`,
-    origin: Number.isFinite(state.heading) ? state.heading : null,
-    counts: { front: 0, right: 0, back: 0, left: 0, up: 0, down: 0 },
-    manual: "front",
+    origin: f && Math.abs(f[2]) < 0.7 ? Math.atan2(f[0], f[1]) / DEG : null,
+    counts: {},
+    shots: 0,
+    extra: 0,
   };
-  state.sphereSignature = "";
+  state.sphereText = "";
   renderSphere();
-  showToast(Number.isFinite(state.heading) ? "前是現在的朝向。接著拍右、後、左，再拍上和下" : "先點方向，再按快門");
+  showToast(f
+    ? "原地不動，照畫面上的圓點轉動手機。圓點進到中間圓圈就點它拍照，建議用 1× 不縮放"
+    : "這台沒有方向感應器，依提示順序拍，拍完點中間圓圈");
 }
 
-function commitSphereSlot(slot) {
-  if (!state.sphere || !slot) return;
-  const heading = state.capturedHeading;
-  if (state.sphere.origin == null && Number.isFinite(heading) && slot !== "up" && slot !== "down") {
-    const offset = { front: 0, right: 90, back: 180, left: 270 }[slot] || 0;
-    state.sphere.origin = (heading - offset + 360) % 360;
+function commitSphereShot(targetId) {
+  const session = state.sphere;
+  if (!session) return;
+  if (targetById(targetId)) session.counts[targetId] = (session.counts[targetId] || 0) + 1;
+  else session.extra += 1;
+  session.shots += 1;
+  state.sphereText = "";
+}
+
+function flashScreen() {
+  ui.flash.classList.remove("go");
+  void ui.flash.offsetWidth;
+  ui.flash.classList.add("go");
+}
+
+async function captureSphereShot() {
+  if (state.busy) return;
+  const vw = ui.preview.videoWidth;
+  const vh = ui.preview.videoHeight;
+  if (!vw || !vh) {
+    showToast("相機畫面還沒準備好");
+    return;
   }
-  state.sphere.counts[slot] = (state.sphere.counts[slot] || 0) + 1;
-  state.sphereSignature = "";
+  state.busy = true;
+  ui.shutter.disabled = true;
+  ui.sphereRing.disabled = true;
+  playShutter();
+  flashScreen();
+  const when = new Date();
+  snapshotShot();
+  const rot = state.rot;
+  const yawFix = Number.isFinite(state.yawFix) ? state.yawFix : 0;
+  const targetId = sphereAssign();
+  state.capturedDirection = targetId;
+  try {
+    const zoom = state.zoomMode === "hardware"
+      ? Math.max(1, state.zoom / (state.hwZoom > 0 ? state.hwZoom : 1))
+      : Math.max(1, state.zoom);
+    const sw = vw / zoom;
+    const sh = vh / zoom;
+    const size = fittedSize(sw, sh);
+    const canvas = document.createElement("canvas");
+    canvas.width = size.width;
+    canvas.height = size.height;
+    canvas.getContext("2d").drawImage(ui.preview, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, canvas.width, canvas.height);
+    const hardware = state.zoomMode === "hardware" && state.hwZoom > 0 ? state.hwZoom : 1;
+    const focalPx = (Math.max(vw, vh) / 2 / Math.tan((settings.cameraFov * DEG) / 2)) * hardware;
+    const target = targetById(targetId);
+    const round = (value) => Math.round(value * 10000) / 10000;
+    state.capturedExtra = {
+      fovH: Math.round(((2 * Math.atan(sw / 2 / focalPx)) / DEG) * 100) / 100,
+      fovV: Math.round(((2 * Math.atan(sh / 2 / focalPx)) / DEG) * 100) / 100,
+      rot: rot ? [...rot.f, ...rot.u].map(round) : null,
+      yawFix: Math.round(yawFix * 100) / 100,
+      nomAz: target ? target.az : null,
+      nomPitch: target ? target.pitch : null,
+    };
+    let blob = await blobFromCanvas(canvas);
+    try {
+      blob = await withExif(blob, exifMeta(when, canvas));
+    } catch {
+      /* 位置寫不進檔案時，仍保留這張照片 */
+    }
+    state.blob = blob;
+    state.filename = filenameFor(when).replace(/\.jpg$/, `_${pad((state.sphere?.shots || 0) + 1)}.jpg`);
+    await saveRecord(when, "環景");
+    commitSphereShot(targetId);
+    const left = SPHERE_TARGETS.length - sphereDoneCount();
+    showToast(left
+      ? `已拍「${targetLabel(targetId) || "補拍"}」。還剩 ${left} 個角度`
+      : "全部角度都拍完了，按「組合全景」");
+  } catch {
+    showToast("這張沒寫成功，請再拍一次");
+  } finally {
+    state.capturedExtra = null;
+    state.busy = false;
+    ui.shutter.disabled = !state.stream;
+    ui.sphereRing.disabled = false;
+    renderSphere();
+  }
+}
+
+function finishSphere() {
+  const session = state.sphere;
+  if (!session) return;
+  if (session.shots < 2) {
+    showToast("至少拍 2 張才能組合");
+    return;
+  }
+  const id = session.id;
+  state.sphere = null;
   renderSphere();
+  if (typeof openPano === "function") openPano(id);
 }
 
 function exifDate(date) {
@@ -1512,7 +1850,7 @@ function exifMeta(when, canvas) {
 }
 
 function renderMeta(when, source) {
-  const direction = state.capturedDirection ? SPHERE_LABEL[state.capturedDirection] : "";
+  const direction = state.capturedDirection ? targetLabel(state.capturedDirection) : "";
   const rows = [
     ["時間", formatWhen(when)],
     ["來源", source],
@@ -1537,7 +1875,8 @@ function snapshotShot(fromCamera = true) {
   state.capturedHeading = state.heading;
   state.capturedPitch = state.pitch;
   state.capturedCamera = fromCamera ? readCameraInfo() : null;
-  state.capturedDirection = fromCamera && state.sphere ? (suggestedSlot() || state.sphere.manual || "front") : "";
+  state.capturedDirection = "";
+  state.capturedExtra = null;
 }
 
 async function present(canvas, when, source) {
@@ -1553,10 +1892,7 @@ async function present(canvas, when, source) {
   state.objectUrl = URL.createObjectURL(state.blob);
   ui.shot.src = state.objectUrl;
   renderMeta(when, source);
-  commitSphereSlot(state.capturedDirection);
-  ui.resultHint.textContent = state.sphere
-    ? `這張已留在紀錄。${sphereMissing()}。按繼續拍回到即時畫面。`
-    : "這張已留在紀錄。繼續拍會回到即時畫面，拍下一張。";
+  ui.resultHint.textContent = "這張已留在紀錄。繼續拍會回到即時畫面，拍下一張。";
   show("result");
   saveRecord(when, source).catch(() => showToast("這張沒有寫進拍攝紀錄"));
 }
@@ -1620,6 +1956,7 @@ function playShutter() {
 
 async function captureVideo() {
   if (state.busy) return;
+  if (state.sphere) return captureSphereShot();
   const width = ui.preview.videoWidth;
   const height = ui.preview.videoHeight;
   if (!width || !height) {
@@ -1859,6 +2196,10 @@ ui.save.addEventListener("click", saveToAlbum);
 ui.share.addEventListener("click", shareBlob);
 
 window.addEventListener("keydown", (event) => {
+  if (typeof isPanoOpen === "function" && isPanoOpen()) {
+    if (event.key === "Escape") closePano();
+    return;
+  }
   if (event.key === "Escape" && !ui.mapScreen.hidden) {
     closeMap();
     return;
@@ -1976,10 +2317,11 @@ async function saveRecord(when, source) {
     altitude: Number.isFinite(state.coords?.altitude) ? state.coords.altitude : null,
     camera: formatCamera(state.capturedCamera, state.capturedDirection) || (source === "相簿" ? "相簿" : ""),
     direction: state.capturedDirection || "",
-    spotId: state.sphere?.id || "",
+    spotId: state.sphere && state.capturedDirection ? state.sphere.id : "",
     filename: state.filename,
     source,
     blob: state.blob,
+    ...(state.capturedExtra || {}),
   });
   maybeSync();
 }
@@ -2020,6 +2362,15 @@ function recordMeta(record) {
     spotId: record.spotId || "",
     filename: record.filename || "",
     source: record.source || "",
+    kind: record.kind || "",
+    panoOf: record.panoOf || "",
+    shots: Number.isFinite(record.shots) ? record.shots : null,
+    fovH: Number.isFinite(record.fovH) ? record.fovH : null,
+    fovV: Number.isFinite(record.fovV) ? record.fovV : null,
+    rot: Array.isArray(record.rot) && record.rot.length === 6 ? record.rot : null,
+    yawFix: Number.isFinite(record.yawFix) ? record.yawFix : 0,
+    nomAz: Number.isFinite(record.nomAz) ? record.nomAz : null,
+    nomPitch: Number.isFinite(record.nomPitch) ? record.nomPitch : null,
   };
 }
 
@@ -2451,9 +2802,18 @@ function rowValues(record) {
 function mapLink(record) {
   if (!Number.isFinite(record?.lat) || !Number.isFinite(record?.lon)) return "";
   const url = new URL(location.href);
-  url.hash = record.spotId
-    ? `spot=${encodeURIComponent(record.spotId)}`
-    : `map=${encodeURIComponent(record.id)}`;
+  if (record.kind === "pano") url.hash = `pano=${encodeURIComponent(record.panoOf || "")}`;
+  else {
+    url.hash = record.spotId
+      ? `spot=${encodeURIComponent(record.spotId)}`
+      : `map=${encodeURIComponent(record.id)}`;
+  }
+  return url.href;
+}
+
+function panoLink(spotId) {
+  const url = new URL(location.href);
+  url.hash = `pano=${encodeURIComponent(spotId)}`;
   return url.href;
 }
 
@@ -2498,8 +2858,14 @@ async function renderLog() {
       if (isLink) {
         const link = document.createElement("a");
         link.href = value;
-        link.textContent = index === values.length - 1 ? "開啟" : "地圖";
+        link.textContent = index === values.length - 1 ? "開啟" : record.kind === "pano" ? "環景" : "地圖";
         td.append(link);
+        if (index !== values.length - 1 && record.spotId && record.kind !== "pano") {
+          const panoAnchor = document.createElement("a");
+          panoAnchor.href = panoLink(record.spotId);
+          panoAnchor.textContent = "環景";
+          td.append(document.createTextNode(" "), panoAnchor);
+        }
         if (index === values.length - 1) {
           const del = document.createElement("button");
           del.type = "button";
@@ -2752,17 +3118,16 @@ function destinationPoint(lat, lon, bearingDeg, distanceM) {
   return [(lat2 * 180) / Math.PI, ((lon2 * 180) / Math.PI + 540) % 360 - 180];
 }
 
-function viewCone(lat, lon, heading) {
+function viewCone(lat, lon, heading, fov = 70, meters = 36) {
   const points = [[lat, lon]];
-  const fov = 70;
   for (let step = 0; step <= 10; step += 1) {
-    points.push(destinationPoint(lat, lon, heading - fov / 2 + (fov * step) / 10, 36));
+    points.push(destinationPoint(lat, lon, heading - fov / 2 + (fov * step) / 10, meters));
   }
   return points;
 }
 
 function mapRecords(records, focus) {
-  const located = records.filter((record) => Number.isFinite(record.lat) && Number.isFinite(record.lon));
+  const located = records.filter((record) => record.kind !== "pano" && Number.isFinite(record.lat) && Number.isFinite(record.lon));
   if (focus.spotId) return located.filter((record) => record.spotId === focus.spotId);
   if (focus.photoId) {
     const one = located.find((record) => record.id === focus.photoId);
@@ -2812,6 +3177,9 @@ async function openMap(focus = {}, fromHash = false) {
 function drawMap(records, highlightId) {
   clearMapThumbs();
   ui.mapPhotos.replaceChildren();
+  const mapSpot = records.find((record) => record.spotId)?.spotId || "";
+  ui.mapPano.hidden = !mapSpot;
+  ui.mapPano.dataset.spot = mapSpot;
   if (state.leafletMap) {
     state.leafletMap.remove();
     state.leafletMap = null;
@@ -2835,12 +3203,12 @@ function drawMap(records, highlightId) {
     const upward = record.direction === "up" || (Number.isFinite(record.pitch) && record.pitch >= 50);
     const downward = record.direction === "down" || (Number.isFinite(record.pitch) && record.pitch <= -50);
     if (heading != null && !upward && !downward) {
-      L.polygon(viewCone(record.lat, record.lon, heading), {
+      L.polygon(viewCone(record.lat, record.lon, heading, Number.isFinite(record.fovH) ? record.fovH : 70), {
         color: "#e7a322",
         weight: selected ? 3 : 1,
         fillColor: "#e7a322",
         fillOpacity: selected ? 0.45 : 0.28,
-      }).addTo(map).bindPopup(`${SPHERE_LABEL[record.direction] || "視角"} ${formatHeading(heading)}`);
+      }).addTo(map).bindPopup(`${targetLabel(record.direction) || "視角"} ${formatHeading(heading)}`);
     } else {
       L.circle([record.lat, record.lon], {
         radius: upward ? 18 : 8,
@@ -2857,7 +3225,7 @@ function drawMap(records, highlightId) {
       const button = document.createElement("button");
       button.type = "button";
       button.classList.toggle("is-on", selected);
-      button.title = SPHERE_LABEL[record.direction] || record.filename || "照片";
+      button.title = targetLabel(record.direction) || record.filename || "照片";
       const image = document.createElement("img");
       image.alt = button.title;
       image.src = url;
@@ -2890,16 +3258,24 @@ function handleHash() {
   }
   if (hash.startsWith("#spot=")) {
     openMap({ spotId: decodeURIComponent(hash.slice(6)) }, true);
+    return;
+  }
+  if (hash.startsWith("#pano=") && typeof openPano === "function") {
+    openPano(decodeURIComponent(hash.slice(6)), true);
   }
 }
 
 ui.sphereToggle.addEventListener("click", toggleSphere);
-ui.sphereSlots.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-slot]");
-  if (!button || !state.sphere) return;
-  state.sphere.manual = button.dataset.slot;
-  state.sphereSignature = "";
-  renderSphere();
+ui.sphereRing.addEventListener("click", captureVideo);
+ui.sphereFinish.addEventListener("click", finishSphere);
+ui.mapPano.addEventListener("click", () => {
+  const spot = ui.mapPano.dataset.spot;
+  if (spot && typeof openPano === "function") openPano(spot);
+});
+ui.cameraFov.addEventListener("input", () => {
+  settings.cameraFov = Number(ui.cameraFov.value);
+  ui.cameraFovLabel.textContent = `${Math.round(settings.cameraFov)}°`;
+  saveSettings();
 });
 ui.logMap.addEventListener("click", () => openMap({}));
 ui.googleClient.addEventListener("change", () => {
